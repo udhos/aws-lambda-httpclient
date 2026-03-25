@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"time"
 
@@ -14,12 +15,14 @@ import (
 )
 
 // Version is lambda version.
-const Version = "0.0.0"
+const Version = "0.0.1"
 
 // HandleRequest is lambda handler.
 func HandleRequest() {
 
 	const me = "aws-lambda-httpclient"
+
+	log.Printf("%s %s", me, Version)
 
 	env := envconfig.NewSimple(me)
 
@@ -49,24 +52,34 @@ func HandleRequest() {
 	for i := range count {
 		begin := time.Now()
 
-		resp, status, err := request(client, method, u, virtualHost, rd, h)
+		resp, status, remote, err := request(client, method, u, virtualHost, rd, h)
 
 		elap := time.Since(begin)
 
-		log.Printf("%d/%d: virtual_host='%s' %s %s: latency=%v status=%d response='%s' error='%v'",
-			i+1, count, virtualHost, method, u, elap, status, resp, err)
+		log.Printf("%d/%d: virtual_host='%s' %s %s: latency=%v status=%d remote=%s response='%s' error='%v'",
+			i+1, count, virtualHost, method, u, elap, status, remote, resp, err)
 
 		time.Sleep(interval)
 	}
 }
 
 func request(client *http.Client, method, u, virtualHost string,
-	reqBody io.Reader, h http.Header) (string, int, error) {
+	reqBody io.Reader, h http.Header) (string, int, string, error) {
+
+	var remote string
+
+	trace := &httptrace.ClientTrace{
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			remote = connInfo.Conn.RemoteAddr().String()
+		},
+	}
 
 	req, errReq := http.NewRequest(method, u, reqBody)
 	if errReq != nil {
-		return "", 0, errReq
+		return "", 0, "", errReq
 	}
+
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 
 	req.Header = h
 
@@ -74,14 +87,14 @@ func request(client *http.Client, method, u, virtualHost string,
 
 	resp, errResp := client.Do(req)
 	if errResp != nil {
-		return "", 0, errResp
+		return "", 0, "", errResp
 	}
 	defer resp.Body.Close()
 
 	respBody, errBody := io.ReadAll(resp.Body)
 	if errBody != nil {
-		return "", 0, errResp
+		return "", 0, remote, errResp
 	}
 
-	return string(respBody), resp.StatusCode, nil
+	return string(respBody), resp.StatusCode, remote, nil
 }
