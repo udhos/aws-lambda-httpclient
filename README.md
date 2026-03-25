@@ -1,6 +1,6 @@
 # aws-lambda-httpclient
 
-[aws-lambda-httpclient](https://github.com/udhos/aws-lambda-httpclient) is an AWS lambda function that makes aws requests and logs results.
+[aws-lambda-httpclient](https://github.com/udhos/aws-lambda-httpclient) is an AWS lambda function that makes HTTP requests and logs results.
 
 You can control the requests from env vars.
 
