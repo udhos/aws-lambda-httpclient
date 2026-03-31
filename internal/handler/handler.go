@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +16,7 @@ import (
 )
 
 // Version is lambda version.
-const Version = "0.0.1"
+const Version = "0.0.2"
 
 // HandleRequest is lambda handler.
 func HandleRequest() {
@@ -36,9 +37,18 @@ func HandleRequest() {
 	count := env.Int("COUNT", 3)
 	interval := env.Duration("INTERVAL", time.Second)
 	timeout := env.Duration("TIMEOUT", time.Second)
+	tlsInsecureSkipVerify := env.Bool("TLS_INSECURE_SKIP_VERIFY", false)
 
 	client := http.DefaultClient
 	client.Timeout = timeout
+
+	if tlsInsecureSkipVerify {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: tlsInsecureSkipVerify,
+			},
+		}
+	}
 
 	var h http.Header
 	if err := json.Unmarshal([]byte(headers), &h); err != nil {
