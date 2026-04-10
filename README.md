@@ -19,51 +19,51 @@ The build also generates the app `aws-lambda-httpclient-app` that can be invoked
 Example:
 
 ```bash
-$ COUNT=1 aws-lambda-httpclient-app
-2026/04/10 03:21:34 aws-lambda-httpclient 0.0.6
-2026/04/10 03:21:34 envconfig.NewSimple: SECRET_ROLE_ARN=''
-2026/04/10 03:21:34 METHOD=[] using METHOD=GET default=GET
-2026/04/10 03:21:34 PROTO=[] using PROTO=http default=http
-2026/04/10 03:21:34 URL_HOST=[] using URL_HOST=httpbin.org default=httpbin.org
-2026/04/10 03:21:34 VIRTUAL_HOST=[] using VIRTUAL_HOST= default=
-2026/04/10 03:21:34 ROUTE=[] using ROUTE=/get default=/get
-2026/04/10 03:21:34 BODY=[] using BODY=body default=body
-2026/04/10 03:21:34 HEADERS=[] using HEADERS={"content-type":["application/json"],"who-am-i":["aws-lambda-httpclient"]} default={"content-type":["application/json"],"who-am-i":["aws-lambda-httpclient"]}
-2026/04/10 03:21:34 COUNT=[1] using COUNT=1 default=3
-2026/04/10 03:21:34 INTERVAL=[] using INTERVAL=1s default=1s
-2026/04/10 03:21:34 TIMEOUT=[] using TIMEOUT=1s default=1s
-2026/04/10 03:21:34 TLS_INSECURE_SKIP_VERIFY=[] using TLS_INSECURE_SKIP_VERIFY=false default=false
-2026/04/10 03:21:34 CHECK_DNS=[] using CHECK_DNS=true default=true
-2026/04/10 03:21:34 CHECK_CONNECT=[] using CHECK_CONNECT=true default=true
-2026/04/10 03:21:34 FAMILY_DNS=[] using FAMILY_DNS=ip default=ip
-2026/04/10 03:21:34 FAMILY_CONNECT=[] using FAMILY_CONNECT=tcp default=tcp
-2026/04/10 03:21:34 LOG_HEADERS=[] using LOG_HEADERS=true default=true
-2026/04/10 03:21:34 LOG_BODY=[] using LOG_BODY=true default=true
-2026/04/10 03:21:34 attempt=1/1: DNS lookup SUCCESS latency=15.051624ms host=httpbin.org: [54.145.142.3 52.6.211.202 98.94.233.70 52.71.108.149 44.198.227.194 18.214.245.199 98.89.132.151 34.234.13.116]
-2026/04/10 03:21:34 attempt=1/1: addr=1/8: connect SUCCESS latency=153.360467ms: 54.145.142.3:80(port-lookup)
-2026/04/10 03:21:34 attempt=1/1: addr=2/8: connect SUCCESS latency=157.149478ms: 52.6.211.202:80(port-lookup)
-2026/04/10 03:21:34 attempt=1/1: addr=3/8: connect SUCCESS latency=204.341636ms: 98.94.233.70:80(port-lookup)
-2026/04/10 03:21:35 attempt=1/1: addr=4/8: connect SUCCESS latency=205.062621ms: 52.71.108.149:80(port-lookup)
-2026/04/10 03:21:35 attempt=1/1: addr=5/8: connect SUCCESS latency=203.952706ms: 44.198.227.194:80(port-lookup)
-2026/04/10 03:21:35 attempt=1/1: addr=6/8: connect SUCCESS latency=205.00769ms: 18.214.245.199:80(port-lookup)
-2026/04/10 03:21:35 attempt=1/1: addr=7/8: connect SUCCESS latency=204.36262ms: 98.89.132.151:80(port-lookup)
-2026/04/10 03:21:35 attempt=1/1: addr=8/8: connect SUCCESS latency=204.180742ms: 34.234.13.116:80(port-lookup)
-2026/04/10 03:21:36 attempt=1/1: virtual_host='' GET http://httpbin.org/get: latency=410.523284ms status=200 remote=44.198.227.194:80 http=HTTP/1.1 tls="" body_size=382 error='<nil>'
-2026/04/10 03:21:36 attempt=1/1: response body size=382: {
+$ COUNT=1 aws-lambda-httpclient-app 
+2026/04/10 03:36:07 aws-lambda-httpclient 0.0.7
+2026/04/10 03:36:07 envconfig.NewSimple: SECRET_ROLE_ARN=''
+2026/04/10 03:36:07 METHOD=[] using METHOD=GET default=GET
+2026/04/10 03:36:07 PROTO=[] using PROTO=http default=http
+2026/04/10 03:36:07 URL_HOST=[] using URL_HOST=httpbin.org default=httpbin.org
+2026/04/10 03:36:07 VIRTUAL_HOST=[] using VIRTUAL_HOST= default=
+2026/04/10 03:36:07 ROUTE=[] using ROUTE=/get default=/get
+2026/04/10 03:36:07 BODY=[] using BODY=body default=body
+2026/04/10 03:36:07 HEADERS=[] using HEADERS={"content-type":["application/json"],"who-am-i":["aws-lambda-httpclient"]} default={"content-type":["application/json"],"who-am-i":["aws-lambda-httpclient"]}
+2026/04/10 03:36:07 COUNT=[1] using COUNT=1 default=3
+2026/04/10 03:36:07 INTERVAL=[] using INTERVAL=1s default=1s
+2026/04/10 03:36:07 TIMEOUT=[] using TIMEOUT=1s default=1s
+2026/04/10 03:36:07 TLS_INSECURE_SKIP_VERIFY=[] using TLS_INSECURE_SKIP_VERIFY=false default=false
+2026/04/10 03:36:07 CHECK_DNS=[] using CHECK_DNS=true default=true
+2026/04/10 03:36:07 CHECK_CONNECT=[] using CHECK_CONNECT=true default=true
+2026/04/10 03:36:07 FAMILY_DNS=[] using FAMILY_DNS=ip default=ip
+2026/04/10 03:36:07 FAMILY_CONNECT=[] using FAMILY_CONNECT=tcp default=tcp
+2026/04/10 03:36:07 LOG_HEADERS=[] using LOG_HEADERS=true default=true
+2026/04/10 03:36:07 LOG_BODY=[] using LOG_BODY=true default=true
+2026/04/10 03:36:07 attempt=1/1: DNS lookup SUCCESS latency=12.254891ms host=httpbin.org: [98.94.233.70 52.6.211.202 44.198.227.194 34.234.13.116 52.71.108.149 54.82.157.242 18.214.245.199 52.6.193.180]
+2026/04/10 03:36:07 attempt=1/1: addr=1/8: connect SUCCESS latency=193.252162ms: 98.94.233.70:80(port-lookup)
+2026/04/10 03:36:07 attempt=1/1: addr=2/8: connect SUCCESS latency=204.582775ms: 52.6.211.202:80(port-lookup)
+2026/04/10 03:36:07 attempt=1/1: addr=3/8: connect SUCCESS latency=133.980783ms: 44.198.227.194:80(port-lookup)
+2026/04/10 03:36:08 attempt=1/1: addr=4/8: connect SUCCESS latency=172.790136ms: 34.234.13.116:80(port-lookup)
+2026/04/10 03:36:08 attempt=1/1: addr=5/8: connect SUCCESS latency=204.586248ms: 52.71.108.149:80(port-lookup)
+2026/04/10 03:36:08 attempt=1/1: addr=6/8: connect SUCCESS latency=204.350907ms: 54.82.157.242:80(port-lookup)
+2026/04/10 03:36:08 attempt=1/1: addr=7/8: connect SUCCESS latency=205.397775ms: 18.214.245.199:80(port-lookup)
+2026/04/10 03:36:08 attempt=1/1: addr=8/8: connect SUCCESS latency=204.149377ms: 52.6.193.180:80(port-lookup)
+2026/04/10 03:36:09 attempt=1/1: virtual_host='' GET http://httpbin.org/get: latency=356.944976ms status=200 remote=52.71.108.149:80 http=HTTP/1.1 tls="" body_size=382 error='<nil>'
+2026/04/10 03:36:09 attempt=1/1: response body size=382: {
   "args": {}, 
   "headers": {
     "Accept-Encoding": "gzip", 
     "Content-Length": "4", 
-    "Content-Type": "application/json",
+    "Content-Type": "application/json", 
     "Host": "httpbin.org", 
-    "User-Agent": "Go-http-client/1.1",
+    "User-Agent": "Go-http-client/1.1", 
     "Who-Am-I": "aws-lambda-httpclient", 
-    "X-Amzn-Trace-Id": "Root=1-69d896f0-3af720303889736a14fafd1e"
+    "X-Amzn-Trace-Id": "Root=1-69d89a59-51e1bf494a1658dd586bf876"
   }, 
   "origin": "177.33.85.207", 
   "url": "http://httpbin.org/get"
 }
-2026/04/10 03:21:36 attempt=1/1: response headers: Content-Length=["382"] Server=["gunicorn/19.9.0"] Access-Control-Allow-Origin=["*"] Access-Control-Allow-Credentials=["true"] Date=["Fri, 10 Apr 2026 06:21:36 GMT"] Content-Type=["application/json"]
+2026/04/10 03:36:09 attempt=1/1: response headers: Date=["Fri, 10 Apr 2026 06:36:09 GMT"] Content-Type=["application/json"] Content-Length=["382"] Server=["gunicorn/19.9.0"] Access-Control-Allow-Origin=["*"] Access-Control-Allow-Credentials=["true"]
 ```
 
 # Env vars

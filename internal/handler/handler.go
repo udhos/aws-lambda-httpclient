@@ -18,7 +18,7 @@ import (
 )
 
 // Version is lambda version.
-const Version = "0.0.6"
+const Version = "0.0.7"
 
 // HandleRequest is lambda handler.
 func HandleRequest() {
@@ -47,7 +47,7 @@ func HandleRequest() {
 	logHeaders := env.Bool("LOG_HEADERS", true)
 	logBody := env.Bool("LOG_BODY", true)
 
-	port, portSource := getPort(proto, host)
+	hostOnly, port, portSource := getPort(proto, host)
 
 	client := newClient(timeout, tlsInsecureSkipVerify)
 
@@ -66,13 +66,13 @@ func HandleRequest() {
 
 		if checkDNS {
 			begin := time.Now()
-			addrs, err := lookupHost(familyDNS, host)
+			addrs, err := lookupHost(familyDNS, hostOnly)
 			{
 				elap := time.Since(begin)
 				if err != nil {
-					log.Printf("%s: DNS lookup ERROR latency=%v host=%s: %v", attempt, elap, host, err)
+					log.Printf("%s: DNS lookup ERROR latency=%v host=%s: %v", attempt, elap, hostOnly, err)
 				} else {
-					log.Printf("%s: DNS lookup SUCCESS latency=%v host=%s: %v", attempt, elap, host, addrs)
+					log.Printf("%s: DNS lookup SUCCESS latency=%v host=%s: %v", attempt, elap, hostOnly, addrs)
 				}
 			}
 
@@ -170,27 +170,27 @@ func newClient(timeout time.Duration, tlsInsecureSkipVerify bool) *http.Client {
 	return client
 }
 
-func getPort(proto, host string) (string, string) {
+func getPort(proto, host string) (string, string, string) {
 	// 1. If host contains port, use it.
-	_, port, found := strings.Cut(host, ":")
+	hostOnly, port, found := strings.Cut(host, ":")
 	if found {
-		return port, "host-port"
+		return hostOnly, port, "host-port"
 	}
 
 	// 2. Lookup default port for proto.
 	p, err := net.LookupPort("tcp", proto)
 	if err == nil {
-		return fmt.Sprintf("%d", p), "port-lookup"
+		return hostOnly, fmt.Sprintf("%d", p), "port-lookup"
 	}
 
 	// 3. Some builtin defaults.
 	switch proto {
 	case "https":
-		return "443", "builtin-port"
+		return hostOnly, "443", "builtin-port"
 	}
 
 	// 4. If all else fails, default to 80.
-	return "80", "builtin-port"
+	return hostOnly, "80", "builtin-port"
 }
 
 type response struct {
