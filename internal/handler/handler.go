@@ -16,7 +16,7 @@ import (
 )
 
 // Version is lambda version.
-const Version = "0.0.3"
+const Version = "0.0.4"
 
 // HandleRequest is lambda handler.
 func HandleRequest() {
@@ -62,19 +62,28 @@ func HandleRequest() {
 	for i := range count {
 		begin := time.Now()
 
-		resp, status, remote, err := request(client, method, u, virtualHost, rd, h)
+		resp, err := request(client, method, u, virtualHost, rd, h)
 
 		elap := time.Since(begin)
 
-		log.Printf("%d/%d: virtual_host='%s' %s %s: latency=%v status=%d remote=%s response='%s' error='%v'",
-			i+1, count, virtualHost, method, u, elap, status, remote, resp, err)
+		log.Printf("%d/%d: virtual_host='%s' %s %s: latency=%v status=%d remote=%s http=%s tls=%q response='%s' error='%v'",
+			i+1, count, virtualHost, method, u, elap, resp.status, resp.remote,
+			resp.httpProto, resp.tlsVersion, resp.body, err)
 
 		time.Sleep(interval)
 	}
 }
 
+type response struct {
+	body       string
+	status     int
+	remote     string
+	httpProto  string
+	tlsVersion string
+}
+
 func request(client *http.Client, method, u, virtualHost string,
-	reqBody io.Reader, h http.Header) (string, int, string, error) {
+	reqBody io.Reader, h http.Header) (out response, err error) {
 
 	var remote string
 
@@ -86,7 +95,8 @@ func request(client *http.Client, method, u, virtualHost string,
 
 	req, errReq := http.NewRequest(method, u, reqBody)
 	if errReq != nil {
-		return "", 0, "", errReq
+		err = errReq
+		return
 	}
 
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
@@ -97,14 +107,27 @@ func request(client *http.Client, method, u, virtualHost string,
 
 	resp, errResp := client.Do(req)
 	if errResp != nil {
-		return "", 0, "", errResp
+		err = errResp
+		return
 	}
 	defer resp.Body.Close()
 
 	respBody, errBody := io.ReadAll(resp.Body)
 	if errBody != nil {
-		return "", 0, remote, errResp
+		err = errBody
+		return
 	}
 
-	return string(respBody), resp.StatusCode, remote, nil
+	out = response{
+		body:      string(respBody),
+		status:    resp.StatusCode,
+		remote:    remote,
+		httpProto: resp.Proto,
+	}
+
+	if resp.TLS != nil {
+		out.tlsVersion = tls.VersionName(resp.TLS.Version)
+	}
+
+	return
 }
