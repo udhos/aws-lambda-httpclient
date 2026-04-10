@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -41,7 +42,10 @@ func HandleRequest() {
 	tlsInsecureSkipVerify := env.Bool("TLS_INSECURE_SKIP_VERIFY", false)
 	checkDNS := env.Bool("CHECK_DNS", true)
 	checkConnect := env.Bool("CHECK_CONNECT", true)
+	familyDNS := env.String("FAMILY_DNS", "ip")
+	familyConnect := env.String("FAMILY_CONNECT", "tcp")
 	logHeaders := env.Bool("LOG_HEADERS", true)
+	logBody := env.Bool("LOG_BODY", true)
 
 	port, portSource := getPort(proto, host)
 
@@ -61,7 +65,7 @@ func HandleRequest() {
 		attempt := fmt.Sprintf("attempt=%d/%d", i+1, count)
 
 		if checkDNS {
-			addrs, err := net.LookupHost(host)
+			addrs, err := lookupHost(familyDNS, host)
 			if err != nil {
 				log.Printf("%s: DNS lookup ERROR host=%s: %v", attempt, host, err)
 			} else {
@@ -70,9 +74,22 @@ func HandleRequest() {
 
 			if checkConnect {
 				for j, addr := range addrs {
+					addrStr := addr.String()
 					addrPos := fmt.Sprintf("addr=%d/%d", j+1, len(addrs))
-					portLabel := fmt.Sprintf("%s:%s(%s)", addr, port, portSource)
-					conn, err := net.DialTimeout("tcp", net.JoinHostPort(addr, port), timeout)
+					portLabel := fmt.Sprintf("%s:%s(%s)", addrStr, port, portSource)
+
+					if familyConnect == "tcp4" && !isIPv4(addr) {
+						log.Printf("%s: %s: connect SKIP: %s is not IPv4", attempt, addrPos, portLabel)
+						continue
+					}
+
+					if familyConnect == "tcp6" && !isIPv6(addr) {
+						log.Printf("%s: %s: connect SKIP: %s is not IPv6", attempt, addrPos, portLabel)
+						continue
+					}
+
+					conn, err := net.DialTimeout(familyConnect,
+						net.JoinHostPort(addrStr, port), timeout)
 					if err != nil {
 						log.Printf("%s: %s: connect ERROR: %s failed: %v",
 							attempt, addrPos, portLabel, err)
@@ -89,9 +106,13 @@ func HandleRequest() {
 		resp, err := request(client, method, u, virtualHost, rd, h)
 		elap := time.Since(begin)
 
-		log.Printf("%s: virtual_host='%s' %s %s: latency=%v status=%d remote=%s http=%s tls=%q response='%s' error='%v'",
+		log.Printf("%s: virtual_host='%s' %s %s: latency=%v status=%d remote=%s http=%s tls=%q error='%v'",
 			attempt, virtualHost, method, u, elap, resp.status, resp.remote,
-			resp.httpProto, resp.tlsVersion, resp.body, err)
+			resp.httpProto, resp.tlsVersion, err)
+
+		if logBody {
+			log.Printf("%s: response body: %s", attempt, resp.body)
+		}
 
 		if logHeaders {
 			var list []string
@@ -103,6 +124,18 @@ func HandleRequest() {
 
 		time.Sleep(interval)
 	}
+}
+
+func isIPv4(addr net.IP) bool {
+	return addr.To4() != nil
+}
+
+func isIPv6(addr net.IP) bool {
+	return addr.To16() != nil && addr.To4() == nil
+}
+
+func lookupHost(network, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(context.Background(), network, host)
 }
 
 func newClient(timeout time.Duration, tlsInsecureSkipVerify bool) *http.Client {
