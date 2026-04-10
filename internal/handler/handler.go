@@ -18,7 +18,7 @@ import (
 )
 
 // Version is lambda version.
-const Version = "0.0.5"
+const Version = "0.0.6"
 
 // HandleRequest is lambda handler.
 func HandleRequest() {
@@ -65,11 +65,15 @@ func HandleRequest() {
 		attempt := fmt.Sprintf("attempt=%d/%d", i+1, count)
 
 		if checkDNS {
+			begin := time.Now()
 			addrs, err := lookupHost(familyDNS, host)
-			if err != nil {
-				log.Printf("%s: DNS lookup ERROR host=%s: %v", attempt, host, err)
-			} else {
-				log.Printf("%s: DNS lookup SUCCESS host=%s: %v", attempt, host, addrs)
+			{
+				elap := time.Since(begin)
+				if err != nil {
+					log.Printf("%s: DNS lookup ERROR latency=%v host=%s: %v", attempt, elap, host, err)
+				} else {
+					log.Printf("%s: DNS lookup SUCCESS latency=%v host=%s: %v", attempt, elap, host, addrs)
+				}
 			}
 
 			if checkConnect {
@@ -88,14 +92,15 @@ func HandleRequest() {
 						continue
 					}
 
+					beginConnect := time.Now()
 					conn, err := net.DialTimeout(familyConnect,
 						net.JoinHostPort(addrStr, port), timeout)
+					elapConnect := time.Since(beginConnect)
+
 					if err != nil {
-						log.Printf("%s: %s: connect ERROR: %s failed: %v",
-							attempt, addrPos, portLabel, err)
+						log.Printf("%s: %s: connect ERROR latency=%v: %s failed: %v", attempt, addrPos, elapConnect, portLabel, err)
 					} else {
-						log.Printf("%s: %s: connect SUCCESS: %s",
-							attempt, addrPos, portLabel)
+						log.Printf("%s: %s: connect SUCCESS latency=%v: %s", attempt, addrPos, elapConnect, portLabel)
 						conn.Close()
 					}
 				}
@@ -106,12 +111,12 @@ func HandleRequest() {
 		resp, err := request(client, method, u, virtualHost, rd, h)
 		elap := time.Since(begin)
 
-		log.Printf("%s: virtual_host='%s' %s %s: latency=%v status=%d remote=%s http=%s tls=%q error='%v'",
+		log.Printf("%s: virtual_host='%s' %s %s: latency=%v status=%d remote=%s http=%s tls=%q body_size=%d error='%v'",
 			attempt, virtualHost, method, u, elap, resp.status, resp.remote,
-			resp.httpProto, resp.tlsVersion, err)
+			resp.httpProto, resp.tlsVersion, len(resp.body), err)
 
 		if logBody {
-			log.Printf("%s: response body: %s", attempt, resp.body)
+			log.Printf("%s: response body size=%d: %s", attempt, len(resp.body), resp.body)
 		}
 
 		if logHeaders {
