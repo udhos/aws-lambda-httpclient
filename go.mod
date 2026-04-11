@@ -12,6 +12,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.89.0
 	github.com/aws/smithy-go v1.24.3
 	github.com/udhos/boilerplate v1.6.18
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -66,5 +67,4 @@ require (
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

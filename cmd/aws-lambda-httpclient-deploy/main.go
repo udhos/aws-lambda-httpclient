@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,6 +22,7 @@ import (
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/smithy-go"
+	"gopkg.in/yaml.v3"
 )
 
 type lambda struct {
@@ -55,7 +55,7 @@ func main() {
 	flag.IntVar(&parameters.logRetentionDays, "log-retention-days", 7, "Number of days to retain logs in CloudWatch")
 	flag.IntVar(&parameters.functionTimeoutInSeconds, "function-timeout", 10, "Timeout for the Lambda function in seconds")
 	flag.IntVar(&parameters.memoryInMB, "memory", 128, "Memory size for the Lambda function in MB")
-	flag.StringVar(&parameters.envFile, "env-file", "samples/env.json", "Path to JSON file containing Lambda environment variables")
+	flag.StringVar(&parameters.envFile, "env-file", "samples/env.yaml", "Path to YAML file containing Lambda environment variables")
 	flag.BoolVar(&parameters.destroy, "destroy", false, "Whether to destroy the deployed Lambda function")
 
 	flag.Parse()
@@ -159,7 +159,7 @@ func loadEnvVars(path string) (map[string]string, error) {
 	}
 
 	var envVars map[string]string
-	if errUnmarshal := json.Unmarshal(data, &envVars); errUnmarshal != nil {
+	if errUnmarshal := yaml.Unmarshal(data, &envVars); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
 
