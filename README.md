@@ -104,3 +104,46 @@ Example:
 ```bash
 URL_HOST=52.71.170.232 VIRTUAL_HOST=httpbin.org aws-lambda-httpclient-app
 ```
+
+# Deploment
+
+Once you have built the `lambda.zip` file, you can upload it to Lambda.
+
+You can make use of customary deployment options like Console, AWS CLI,
+Terraform, CloudFormation, etc.
+
+We also provide a quick option to deploy the Lambda function into AWS from
+the command-line using `aws-lambda-httpclient-deploy`.
+
+## Deploy
+
+Just run `aws-lambda-httpclient-deploy` and it will create everything for you.
+
+If the program hits any error during deployment, just try again.
+Some errors are expected when resources are being created for the first time,
+but they should be resolved in subsequent runs.
+
+```bash
+$ aws-lambda-httpclient-deploy
+2026/04/10 23:21:05 ensuring role: name=aws-lambda-httpclient
+2026/04/10 23:21:05 finding role: name=aws-lambda-httpclient
+2026/04/10 23:21:06 ensuring kms key: alias=alias/aws-lambda-httpclient
+2026/04/10 23:21:08 ensuring lambda function: name=aws-lambda-httpclient
+2026/04/10 23:21:13 ensuring log group: name=aws-lambda-httpclient
+2026/04/10 23:21:14 deployment complete: function=aws-lambda-httpclient role=aws-lambda-httpclient security_group= handler=main kms_key=arn:aws:kms:us-east-1:140330866198:key/d042a291-c54c-466f-985a-60c8551c7550
+```
+
+## Destroy
+
+Do not forget to clean-up everything when you are done:
+
+```bash
+$ aws-lambda-httpclient-deploy -destroy
+2026/04/10 23:20:25 deleting lambda function: name=aws-lambda-httpclient
+2026/04/10 23:20:26 deleting kms key: alias=alias/aws-lambda-httpclient
+2026/04/10 23:20:27 scheduled kms key deletion: key=310024ba-0b86-462e-95f8-bb5e35066546 pending_days=7
+2026/04/10 23:20:27 deleting role: name=aws-lambda-httpclient
+2026/04/10 23:20:31 skipping security group deletion because -vpc-id was not provided
+2026/04/10 23:20:31 deleting log group: function=aws-lambda-httpclient
+2026/04/10 23:20:32 destroy complete: function=aws-lambda-httpclient
+```
