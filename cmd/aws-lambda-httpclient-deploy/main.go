@@ -20,6 +20,7 @@ import (
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
+	"github.com/aws/smithy-go"
 )
 
 type lambda struct {
@@ -438,10 +439,180 @@ func ensureLogGroup(ctx context.Context, client *cloudwatchlogs.Client,
 
 // destroyLambda deletes the AWS Lambda function and its associated resources based on the provided parameters.
 func destroyLambda(parameters lambda) {
-	// attempt to delete everything but do not stop midway if any of the delete operations fail.
 
-	// destroy the lambda function.
-	// destroy the role.
-	// destroy the security group.
-	// destroy the cloudwatch log group for the lambda function.
+	// initialize sdk aws client
+
+	ctx := context.Background()
+
+	cfg, errCfg := config.LoadDefaultConfig(ctx)
+	if errCfg != nil {
+		log.Fatalf("load aws config: %v", errCfg)
+	}
+
+	ec2Client := ec2.NewFromConfig(cfg)
+	iamClient := iam.NewFromConfig(cfg)
+	lambdaClient := lambdasvc.NewFromConfig(cfg)
+	logsClient := cloudwatchlogs.NewFromConfig(cfg)
+
+	// delete lambda function
+
+	var errs []error
+
+	if err := deleteLambdaFunction(ctx, lambdaClient, parameters.functionName); err != nil {
+		errs = append(errs, err)
+	}
+
+	// delete role
+
+	if err := deleteRole(ctx, iamClient, parameters.functionName); err != nil {
+		errs = append(errs, err)
+	}
+
+	// delete security group if vpc id was provided
+
+	if parameters.vpcID != "" {
+		if err := deleteSecurityGroup(ctx, ec2Client, parameters.vpcID, parameters.functionName); err != nil {
+			errs = append(errs, err)
+		}
+	} else {
+		log.Printf("skipping security group deletion because -vpc-id was not provided")
+	}
+
+	// delete cloudwatch log group
+
+	if err := deleteLogGroup(ctx, logsClient, parameters.functionName); err != nil {
+		errs = append(errs, err)
+	}
+
+	// report errors if any
+
+	if len(errs) > 0 {
+		for _, err := range errs {
+			log.Printf("destroy error: %v", err)
+		}
+		log.Printf("destroy finished with %d error(s)", len(errs))
+		return
+	}
+
+	log.Printf("destroy complete: function=%s", parameters.functionName)
+}
+
+func deleteLambdaFunction(ctx context.Context, client *lambdasvc.Client, functionName string) error {
+	log.Printf("deleting lambda function: name=%s", functionName)
+
+	_, err := client.DeleteFunction(ctx, &lambdasvc.DeleteFunctionInput{
+		FunctionName: aws.String(functionName),
+	})
+	if err != nil {
+		var notFound *lambdatypes.ResourceNotFoundException
+		if errors.As(err, &notFound) {
+			log.Printf("lambda function not found: name=%s", functionName)
+			return nil
+		}
+		return fmt.Errorf("delete lambda function %s: %w", functionName, err)
+	}
+
+	return nil
+}
+
+func deleteRole(ctx context.Context, client *iam.Client, roleName string) error {
+	log.Printf("deleting role: name=%s", roleName)
+
+	inlinePolicyName := roleName
+	_, errDeleteInline := client.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{
+		RoleName:   aws.String(roleName),
+		PolicyName: aws.String(inlinePolicyName),
+	})
+	if errDeleteInline != nil {
+		var notFound *iamtypes.NoSuchEntityException
+		if !errors.As(errDeleteInline, &notFound) {
+			return fmt.Errorf("delete inline policy %s from role %s: %w", inlinePolicyName, roleName, errDeleteInline)
+		}
+	}
+
+	managedPolicies := []string{
+		"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+		"arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole",
+	}
+
+	for _, policyARN := range managedPolicies {
+		_, errDetach := client.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{
+			RoleName:  aws.String(roleName),
+			PolicyArn: aws.String(policyARN),
+		})
+		if errDetach != nil {
+			var notFound *iamtypes.NoSuchEntityException
+			if !errors.As(errDetach, &notFound) {
+				return fmt.Errorf("detach policy %s from role %s: %w", policyARN, roleName, errDetach)
+			}
+		}
+	}
+
+	_, errDeleteRole := client.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: aws.String(roleName)})
+	if errDeleteRole != nil {
+		var notFound *iamtypes.NoSuchEntityException
+		if errors.As(errDeleteRole, &notFound) {
+			log.Printf("role not found: name=%s", roleName)
+			return nil
+		}
+		return fmt.Errorf("delete role %s: %w", roleName, errDeleteRole)
+	}
+
+	return nil
+}
+
+func deleteSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, groupName string) error {
+	log.Printf("deleting security group: vpc=%s name=%s", vpcID, groupName)
+
+	groupID, errFind := findSecurityGroupID(ctx, client, vpcID, groupName)
+	if errFind != nil {
+		return fmt.Errorf("find security group for deletion: %w", errFind)
+	}
+	if groupID == "" {
+		log.Printf("security group not found: vpc=%s name=%s", vpcID, groupName)
+		return nil
+	}
+
+	_, errDelete := client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: aws.String(groupID)})
+	if errDelete != nil {
+		if isAWSErrorCode(errDelete, "InvalidGroup.NotFound") {
+			log.Printf("security group already deleted: id=%s", groupID)
+			return nil
+		}
+		return fmt.Errorf("delete security group %s: %w", groupID, errDelete)
+	}
+
+	return nil
+}
+
+func deleteLogGroup(ctx context.Context, client *cloudwatchlogs.Client, functionName string) error {
+	log.Printf("deleting log group: function=%s", functionName)
+
+	logGroupName := "/aws/lambda/" + functionName
+	_, err := client.DeleteLogGroup(ctx, &cloudwatchlogs.DeleteLogGroupInput{LogGroupName: aws.String(logGroupName)})
+	if err != nil {
+		var notFound *cloudwatchlogstypes.ResourceNotFoundException
+		if errors.As(err, &notFound) {
+			log.Printf("log group not found: name=%s", logGroupName)
+			return nil
+		}
+		return fmt.Errorf("delete log group %s: %w", logGroupName, err)
+	}
+
+	return nil
+}
+
+func isAWSErrorCode(err error, codes ...string) bool {
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+
+	for _, c := range codes {
+		if apiErr.ErrorCode() == c {
+			return true
+		}
+	}
+
+	return false
 }
