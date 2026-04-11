@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -24,13 +25,17 @@ import (
 )
 
 type lambda struct {
-	functionName         string
-	vpcID                string
-	subnetIDs            string
-	roleInlinePolicyFile string
-	zipFile              string
-	logRetentionDays     int
-	destroy              bool
+	functionName             string
+	vpcID                    string
+	subnetIDs                string
+	roleInlinePolicyFile     string
+	zipFile                  string
+	architecture             string
+	handler                  string
+	logRetentionDays         int
+	functionTimeoutInSeconds int
+	memoryInMB               int
+	destroy                  bool
 }
 
 func main() {
@@ -41,7 +46,11 @@ func main() {
 	flag.StringVar(&parameters.subnetIDs, "subnet-ids", "", "Space-separated IDs of the subnets to deploy the Lambda function in")
 	flag.StringVar(&parameters.roleInlinePolicyFile, "role-inline-policy-file", "samples/lambda-role-policy.json", "Path to a JSON file containing the inline policy for the Lambda execution role")
 	flag.StringVar(&parameters.zipFile, "zip-file", "lambda.zip", "Path to the ZIP file containing the Lambda function code")
+	flag.StringVar(&parameters.architecture, "architecture", "x86_64", "Architecture for the Lambda function (x86_64 or arm64)")
+	flag.StringVar(&parameters.handler, "handler", "main", "Handler for the Lambda function")
 	flag.IntVar(&parameters.logRetentionDays, "log-retention-days", 7, "Number of days to retain logs in CloudWatch")
+	flag.IntVar(&parameters.functionTimeoutInSeconds, "function-timeout", 10, "Timeout for the Lambda function in seconds")
+	flag.IntVar(&parameters.memoryInMB, "memory", 128, "Memory size for the Lambda function in MB")
 	flag.BoolVar(&parameters.destroy, "destroy", false, "Whether to destroy the deployed Lambda function")
 
 	flag.Parse()
@@ -114,7 +123,9 @@ func deployLambda(parameters lambda) {
 	// ensure lambda function
 
 	errLambda := ensureLambda(ctx, lambdaClient, parameters.functionName,
-		roleARN, zipBytes, subnetIDs, securityGroupID)
+		roleARN, zipBytes, subnetIDs, securityGroupID,
+		int32(parameters.functionTimeoutInSeconds), int32(parameters.memoryInMB),
+		parameters.architecture, parameters.handler)
 	if errLambda != nil {
 		log.Fatalf("ensure lambda: %v", errLambda)
 	}
@@ -127,8 +138,8 @@ func deployLambda(parameters lambda) {
 		log.Fatalf("ensure cloudwatch log group: %v", errLogGroup)
 	}
 
-	log.Printf("deployment complete: function=%s role=%s security_group=%s",
-		parameters.functionName, roleName, securityGroupID)
+	log.Printf("deployment complete: function=%s role=%s security_group=%s handler=%s",
+		parameters.functionName, roleName, securityGroupID, parameters.handler)
 }
 
 func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
@@ -341,7 +352,8 @@ func findRoleARN(ctx context.Context, client *iam.Client,
 
 func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	roleARN string, zipBytes []byte, subnetIDs []string,
-	securityGroupID string) error {
+	securityGroupID string, functionTimeoutInSeconds,
+	memoryInMB int32, architecture, handler string) error {
 
 	log.Printf("ensuring lambda function: name=%s", functionName)
 
@@ -365,15 +377,19 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	if errGet != nil {
 		var notFound *lambdatypes.ResourceNotFoundException
 		if errors.As(errGet, &notFound) {
-			_, errCreate := client.CreateFunction(ctx, &lambdasvc.CreateFunctionInput{
-				Architectures: []lambdatypes.Architecture{lambdatypes.ArchitectureArm64},
-				Code:          &lambdatypes.FunctionCode{ZipFile: zipBytes},
-				FunctionName:  aws.String(functionName),
-				Handler:       aws.String("bootstrap"),
-				Role:          aws.String(roleARN),
-				Runtime:       lambdatypes.RuntimeProvidedal2023,
-				VpcConfig:     vpcConfig,
-			})
+			_, errCreate := client.CreateFunction(ctx,
+				&lambdasvc.CreateFunctionInput{
+					Architectures: []lambdatypes.Architecture{lambdatypes.Architecture(architecture)},
+					Code:          &lambdatypes.FunctionCode{ZipFile: zipBytes},
+					FunctionName:  aws.String(functionName),
+					Description:   aws.String(functionName),
+					Handler:       aws.String(handler),
+					Role:          aws.String(roleARN),
+					Runtime:       lambdatypes.RuntimeProvidedal2023,
+					VpcConfig:     vpcConfig,
+					Timeout:       aws.Int32(functionTimeoutInSeconds),
+					MemorySize:    aws.Int32(memoryInMB),
+				})
 			if errCreate != nil {
 				return fmt.Errorf("create function: %w", errCreate)
 			}
@@ -393,10 +409,13 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	_, errCfg := client.UpdateFunctionConfiguration(ctx,
 		&lambdasvc.UpdateFunctionConfigurationInput{
 			FunctionName: aws.String(functionName),
-			Handler:      aws.String("bootstrap"),
+			Description:  aws.String(functionName),
+			Handler:      aws.String(handler),
 			Role:         aws.String(roleARN),
 			Runtime:      lambdatypes.RuntimeProvidedal2023,
 			VpcConfig:    vpcConfig,
+			Timeout:      aws.Int32(functionTimeoutInSeconds),
+			MemorySize:   aws.Int32(memoryInMB),
 		})
 	if errCfg != nil {
 		return fmt.Errorf("update function configuration: %w", errCfg)
@@ -608,11 +627,5 @@ func isAWSErrorCode(err error, codes ...string) bool {
 		return false
 	}
 
-	for _, c := range codes {
-		if apiErr.ErrorCode() == c {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(codes, apiErr.ErrorCode())
 }
