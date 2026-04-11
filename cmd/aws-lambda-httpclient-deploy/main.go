@@ -32,6 +32,7 @@ type lambda struct {
 	zipFile                  string
 	architecture             string
 	handler                  string
+	runtime                  string
 	logRetentionDays         int
 	functionTimeoutInSeconds int
 	memoryInMB               int
@@ -48,6 +49,7 @@ func main() {
 	flag.StringVar(&parameters.zipFile, "zip-file", "lambda.zip", "Path to the ZIP file containing the Lambda function code")
 	flag.StringVar(&parameters.architecture, "architecture", "x86_64", "Architecture for the Lambda function (x86_64 or arm64)")
 	flag.StringVar(&parameters.handler, "handler", "main", "Handler for the Lambda function")
+	flag.StringVar(&parameters.runtime, "runtime", "provided.al2023", "Runtime for the Lambda function")
 	flag.IntVar(&parameters.logRetentionDays, "log-retention-days", 7, "Number of days to retain logs in CloudWatch")
 	flag.IntVar(&parameters.functionTimeoutInSeconds, "function-timeout", 10, "Timeout for the Lambda function in seconds")
 	flag.IntVar(&parameters.memoryInMB, "memory", 128, "Memory size for the Lambda function in MB")
@@ -125,7 +127,7 @@ func deployLambda(parameters lambda) {
 	errLambda := ensureLambda(ctx, lambdaClient, parameters.functionName,
 		roleARN, zipBytes, subnetIDs, securityGroupID,
 		int32(parameters.functionTimeoutInSeconds), int32(parameters.memoryInMB),
-		parameters.architecture, parameters.handler)
+		parameters.architecture, parameters.handler, parameters.runtime)
 	if errLambda != nil {
 		log.Fatalf("ensure lambda: %v", errLambda)
 	}
@@ -353,7 +355,7 @@ func findRoleARN(ctx context.Context, client *iam.Client,
 func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	roleARN string, zipBytes []byte, subnetIDs []string,
 	securityGroupID string, functionTimeoutInSeconds,
-	memoryInMB int32, architecture, handler string) error {
+	memoryInMB int32, architecture, handler, runtime string) error {
 
 	log.Printf("ensuring lambda function: name=%s", functionName)
 
@@ -385,7 +387,7 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 					Description:   aws.String(functionName),
 					Handler:       aws.String(handler),
 					Role:          aws.String(roleARN),
-					Runtime:       lambdatypes.RuntimeProvidedal2023,
+					Runtime:       lambdatypes.Runtime(runtime),
 					VpcConfig:     vpcConfig,
 					Timeout:       aws.Int32(functionTimeoutInSeconds),
 					MemorySize:    aws.Int32(memoryInMB),
@@ -412,7 +414,7 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 			Description:  aws.String(functionName),
 			Handler:      aws.String(handler),
 			Role:         aws.String(roleARN),
-			Runtime:      lambdatypes.RuntimeProvidedal2023,
+			Runtime:      lambdatypes.Runtime(runtime),
 			VpcConfig:    vpcConfig,
 			Timeout:      aws.Int32(functionTimeoutInSeconds),
 			MemorySize:   aws.Int32(memoryInMB),
