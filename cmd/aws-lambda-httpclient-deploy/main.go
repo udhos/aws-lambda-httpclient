@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,6 +38,7 @@ type lambda struct {
 	functionTimeoutInSeconds int
 	memoryInMB               int
 	destroy                  bool
+	envFile                  string
 }
 
 func main() {
@@ -53,6 +55,7 @@ func main() {
 	flag.IntVar(&parameters.logRetentionDays, "log-retention-days", 7, "Number of days to retain logs in CloudWatch")
 	flag.IntVar(&parameters.functionTimeoutInSeconds, "function-timeout", 10, "Timeout for the Lambda function in seconds")
 	flag.IntVar(&parameters.memoryInMB, "memory", 128, "Memory size for the Lambda function in MB")
+	flag.StringVar(&parameters.envFile, "env-file", "samples/env.json", "Path to JSON file containing Lambda environment variables")
 	flag.BoolVar(&parameters.destroy, "destroy", false, "Whether to destroy the deployed Lambda function")
 
 	flag.Parse()
@@ -124,10 +127,15 @@ func deployLambda(parameters lambda) {
 
 	// ensure lambda function
 
+	envVars, errEnvFile := loadEnvVars(parameters.envFile)
+	if errEnvFile != nil {
+		log.Fatalf("load env file: %s: %v", parameters.envFile, errEnvFile)
+	}
+
 	errLambda := ensureLambda(ctx, lambdaClient, parameters.functionName,
 		roleARN, zipBytes, subnetIDs, securityGroupID,
 		int32(parameters.functionTimeoutInSeconds), int32(parameters.memoryInMB),
-		parameters.architecture, parameters.handler, parameters.runtime)
+		parameters.architecture, parameters.handler, parameters.runtime, envVars)
 	if errLambda != nil {
 		log.Fatalf("ensure lambda: %v", errLambda)
 	}
@@ -142,6 +150,24 @@ func deployLambda(parameters lambda) {
 
 	log.Printf("deployment complete: function=%s role=%s security_group=%s handler=%s",
 		parameters.functionName, roleName, securityGroupID, parameters.handler)
+}
+
+func loadEnvVars(path string) (map[string]string, error) {
+	data, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return nil, errRead
+	}
+
+	var envVars map[string]string
+	if errUnmarshal := json.Unmarshal(data, &envVars); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+
+	if envVars == nil {
+		envVars = map[string]string{}
+	}
+
+	return envVars, nil
 }
 
 func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
@@ -355,7 +381,8 @@ func findRoleARN(ctx context.Context, client *iam.Client,
 func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	roleARN string, zipBytes []byte, subnetIDs []string,
 	securityGroupID string, functionTimeoutInSeconds,
-	memoryInMB int32, architecture, handler, runtime string) error {
+	memoryInMB int32, architecture, handler, runtime string,
+	envVars map[string]string) error {
 
 	log.Printf("ensuring lambda function: name=%s", functionName)
 
@@ -391,6 +418,7 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 					VpcConfig:     vpcConfig,
 					Timeout:       aws.Int32(functionTimeoutInSeconds),
 					MemorySize:    aws.Int32(memoryInMB),
+					Environment:   &lambdatypes.Environment{Variables: envVars},
 				})
 			if errCreate != nil {
 				return fmt.Errorf("create function: %w", errCreate)
@@ -418,6 +446,7 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 			VpcConfig:    vpcConfig,
 			Timeout:      aws.Int32(functionTimeoutInSeconds),
 			MemorySize:   aws.Int32(memoryInMB),
+			Environment:  &lambdatypes.Environment{Variables: envVars},
 		})
 	if errCfg != nil {
 		return fmt.Errorf("update function configuration: %w", errCfg)
