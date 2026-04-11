@@ -2,7 +2,9 @@
 
 [aws-lambda-httpclient](https://github.com/udhos/aws-lambda-httpclient) is an AWS lambda function that makes HTTP requests and logs results.
 
-You can control the requests from env vars.
+You can control the request parameters using env vars.
+
+It is intended as a handy tool that can be easily deployed to AWS Lambda and serve as a curl-like network probe to investigate network issues on http endpoints. It helps with the common situation of having to spin up a new EC2 host for running curl on an VPC that lacks a preprovisioned bastion host. This tools can be provisioned to AWS in a matter of seconds, and later deprovisioned as easily.
 
 # Build
 
