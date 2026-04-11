@@ -19,6 +19,8 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/smithy-go"
@@ -84,6 +86,7 @@ func deployLambda(parameters lambda) {
 
 	ec2Client := ec2.NewFromConfig(cfg)
 	iamClient := iam.NewFromConfig(cfg)
+	kmsClient := kms.NewFromConfig(cfg)
 	lambdaClient := lambdasvc.NewFromConfig(cfg)
 	logsClient := cloudwatchlogs.NewFromConfig(cfg)
 
@@ -132,10 +135,17 @@ func deployLambda(parameters lambda) {
 		log.Fatalf("load env file: %s: %v", parameters.envFile, errEnvFile)
 	}
 
+	kmsKeyARN, errKMS := ensureKMSKey(ctx, kmsClient, parameters.functionName,
+		roleARN)
+	if errKMS != nil {
+		log.Fatalf("ensure kms key: %v", errKMS)
+	}
+
 	errLambda := ensureLambda(ctx, lambdaClient, parameters.functionName,
 		roleARN, zipBytes, subnetIDs, securityGroupID,
 		int32(parameters.functionTimeoutInSeconds), int32(parameters.memoryInMB),
-		parameters.architecture, parameters.handler, parameters.runtime, envVars)
+		parameters.architecture, parameters.handler, parameters.runtime,
+		envVars, kmsKeyARN)
 	if errLambda != nil {
 		log.Fatalf("ensure lambda: %v", errLambda)
 	}
@@ -148,8 +158,8 @@ func deployLambda(parameters lambda) {
 		log.Fatalf("ensure cloudwatch log group: %v", errLogGroup)
 	}
 
-	log.Printf("deployment complete: function=%s role=%s security_group=%s handler=%s",
-		parameters.functionName, roleName, securityGroupID, parameters.handler)
+	log.Printf("deployment complete: function=%s role=%s security_group=%s handler=%s kms_key=%s",
+		parameters.functionName, roleName, securityGroupID, parameters.handler, kmsKeyARN)
 }
 
 func loadEnvVars(path string) (map[string]string, error) {
@@ -378,11 +388,156 @@ func findRoleARN(ctx context.Context, client *iam.Client,
 	return aws.ToString(out.Role.Arn), nil
 }
 
+func kmsAliasName(functionName string) string {
+	return "alias/" + functionName
+}
+
+func ensureKMSKey(ctx context.Context, client *kms.Client, functionName,
+	roleARN string) (string, error) {
+
+	alias := kmsAliasName(functionName)
+	log.Printf("ensuring kms key: alias=%s", alias)
+
+	keyID, keyARN, errFind := findKMSKeyByAlias(ctx, client, alias)
+	if errFind != nil {
+		return "", fmt.Errorf("find kms key by alias %s: %w", alias, errFind)
+	}
+
+	if keyID == "" {
+		createOut, errCreate := client.CreateKey(ctx, &kms.CreateKeyInput{
+			Description: aws.String("KMS key for Lambda environment variables: " + functionName),
+			KeySpec:     kmstypes.KeySpecSymmetricDefault,
+			KeyUsage:    kmstypes.KeyUsageTypeEncryptDecrypt,
+			Origin:      kmstypes.OriginTypeAwsKms,
+		})
+		if errCreate != nil {
+			return "", fmt.Errorf("create kms key: %w", errCreate)
+		}
+
+		if createOut.KeyMetadata == nil {
+			return "", fmt.Errorf("create kms key returned empty metadata")
+		}
+
+		keyID = aws.ToString(createOut.KeyMetadata.KeyId)
+		keyARN = aws.ToString(createOut.KeyMetadata.Arn)
+
+		_, errAlias := client.CreateAlias(ctx, &kms.CreateAliasInput{
+			AliasName:   aws.String(alias),
+			TargetKeyId: aws.String(keyID),
+		})
+		if errAlias != nil {
+			if !isAWSErrorCode(errAlias, "AlreadyExistsException") {
+				return "", fmt.Errorf("create kms alias %s: %w", alias, errAlias)
+			}
+
+			keyIDExisting, keyARNExisting, errExisting := findKMSKeyByAlias(ctx, client, alias)
+			if errExisting != nil {
+				return "", fmt.Errorf("find existing kms alias %s after conflict: %w", alias, errExisting)
+			}
+			if keyIDExisting == "" {
+				return "", fmt.Errorf("kms alias %s exists but target key was not found", alias)
+			}
+			keyID = keyIDExisting
+			keyARN = keyARNExisting
+		}
+	}
+
+	_, errRotate := client.EnableKeyRotation(ctx, &kms.EnableKeyRotationInput{KeyId: aws.String(keyID)})
+	if errRotate != nil && !isAWSErrorCode(errRotate, "UnsupportedOperationException") {
+		return "", fmt.Errorf("enable key rotation for kms key %s: %w", keyID, errRotate)
+	}
+
+	if keyARN == "" {
+		descOut, errDescribe := client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: aws.String(keyID)})
+		if errDescribe != nil {
+			return "", fmt.Errorf("describe kms key %s: %w", keyID, errDescribe)
+		}
+		if descOut.KeyMetadata == nil {
+			return "", fmt.Errorf("describe kms key %s returned empty metadata", keyID)
+		}
+		keyARN = aws.ToString(descOut.KeyMetadata.Arn)
+	}
+
+	if errGrant := ensureKMSGrant(ctx, client, keyID, roleARN, functionName); errGrant != nil {
+		return "", errGrant
+	}
+
+	return keyARN, nil
+}
+
+func ensureKMSGrant(ctx context.Context, client *kms.Client, keyID, roleARN, functionName string) error {
+	grantName := functionName + "-lambda-env"
+	p := kms.NewListGrantsPaginator(client, &kms.ListGrantsInput{KeyId: aws.String(keyID)})
+	for p.HasMorePages() {
+		page, errPage := p.NextPage(ctx)
+		if errPage != nil {
+			return fmt.Errorf("list grants for kms key %s: %w", keyID, errPage)
+		}
+
+		for _, g := range page.Grants {
+			if aws.ToString(g.GranteePrincipal) == roleARN && aws.ToString(g.Name) == grantName {
+				return nil
+			}
+		}
+	}
+
+	_, errGrant := client.CreateGrant(ctx, &kms.CreateGrantInput{
+		GranteePrincipal: aws.String(roleARN),
+		KeyId:            aws.String(keyID),
+		Name:             aws.String(grantName),
+		Operations: []kmstypes.GrantOperation{
+			kmstypes.GrantOperationDecrypt,
+			kmstypes.GrantOperationEncrypt,
+			kmstypes.GrantOperationGenerateDataKey,
+			kmstypes.GrantOperationGenerateDataKeyWithoutPlaintext,
+			kmstypes.GrantOperationDescribeKey,
+		},
+	})
+	if errGrant != nil {
+		return fmt.Errorf("create kms grant for role %s on key %s: %w", roleARN, keyID, errGrant)
+	}
+
+	return nil
+}
+
+func findKMSKeyByAlias(ctx context.Context, client *kms.Client, alias string) (string, string, error) {
+	p := kms.NewListAliasesPaginator(client, &kms.ListAliasesInput{})
+	for p.HasMorePages() {
+		page, errPage := p.NextPage(ctx)
+		if errPage != nil {
+			return "", "", errPage
+		}
+
+		for _, a := range page.Aliases {
+			if aws.ToString(a.AliasName) != alias {
+				continue
+			}
+
+			keyID := aws.ToString(a.TargetKeyId)
+			if keyID == "" {
+				return "", "", nil
+			}
+
+			descOut, errDescribe := client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: aws.String(keyID)})
+			if errDescribe != nil {
+				return "", "", errDescribe
+			}
+			if descOut.KeyMetadata == nil {
+				return keyID, "", nil
+			}
+
+			return keyID, aws.ToString(descOut.KeyMetadata.Arn), nil
+		}
+	}
+
+	return "", "", nil
+}
+
 func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	roleARN string, zipBytes []byte, subnetIDs []string,
 	securityGroupID string, functionTimeoutInSeconds,
 	memoryInMB int32, architecture, handler, runtime string,
-	envVars map[string]string) error {
+	envVars map[string]string, kmsKeyARN string) error {
 
 	log.Printf("ensuring lambda function: name=%s", functionName)
 
@@ -419,6 +574,7 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 					Timeout:       aws.Int32(functionTimeoutInSeconds),
 					MemorySize:    aws.Int32(memoryInMB),
 					Environment:   &lambdatypes.Environment{Variables: envVars},
+					KMSKeyArn:     aws.String(kmsKeyARN),
 				})
 			if errCreate != nil {
 				return fmt.Errorf("create function: %w", errCreate)
@@ -447,6 +603,7 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 			Timeout:      aws.Int32(functionTimeoutInSeconds),
 			MemorySize:   aws.Int32(memoryInMB),
 			Environment:  &lambdatypes.Environment{Variables: envVars},
+			KMSKeyArn:    aws.String(kmsKeyARN),
 		})
 	if errCfg != nil {
 		return fmt.Errorf("update function configuration: %w", errCfg)
@@ -501,6 +658,7 @@ func destroyLambda(parameters lambda) {
 
 	ec2Client := ec2.NewFromConfig(cfg)
 	iamClient := iam.NewFromConfig(cfg)
+	kmsClient := kms.NewFromConfig(cfg)
 	lambdaClient := lambdasvc.NewFromConfig(cfg)
 	logsClient := cloudwatchlogs.NewFromConfig(cfg)
 
@@ -509,6 +667,12 @@ func destroyLambda(parameters lambda) {
 	var errs []error
 
 	if err := deleteLambdaFunction(ctx, lambdaClient, parameters.functionName); err != nil {
+		errs = append(errs, err)
+	}
+
+	// schedule deletion for kms key protecting lambda environment variables
+
+	if err := deleteKMSKey(ctx, kmsClient, parameters.functionName); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -649,6 +813,41 @@ func deleteLogGroup(ctx context.Context, client *cloudwatchlogs.Client, function
 		return fmt.Errorf("delete log group %s: %w", logGroupName, err)
 	}
 
+	return nil
+}
+
+func deleteKMSKey(ctx context.Context, client *kms.Client, functionName string) error {
+	alias := kmsAliasName(functionName)
+	log.Printf("deleting kms key: alias=%s", alias)
+
+	keyID, _, errFind := findKMSKeyByAlias(ctx, client, alias)
+	if errFind != nil {
+		return fmt.Errorf("find kms key by alias %s for deletion: %w", alias, errFind)
+	}
+
+	if keyID == "" {
+		log.Printf("kms alias/key not found: alias=%s", alias)
+		return nil
+	}
+
+	_, errAlias := client.DeleteAlias(ctx, &kms.DeleteAliasInput{AliasName: aws.String(alias)})
+	if errAlias != nil && !isAWSErrorCode(errAlias, "NotFoundException") {
+		return fmt.Errorf("delete kms alias %s: %w", alias, errAlias)
+	}
+
+	_, errSchedule := client.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{
+		KeyId:               aws.String(keyID),
+		PendingWindowInDays: aws.Int32(7),
+	})
+	if errSchedule != nil {
+		if isAWSErrorCode(errSchedule, "NotFoundException", "KMSInvalidStateException") {
+			log.Printf("kms key already missing or pending deletion: key=%s", keyID)
+			return nil
+		}
+		return fmt.Errorf("schedule deletion for kms key %s: %w", keyID, errSchedule)
+	}
+
+	log.Printf("scheduled kms key deletion: key=%s pending_days=7", keyID)
 	return nil
 }
 
