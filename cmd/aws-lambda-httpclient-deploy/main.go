@@ -1160,7 +1160,7 @@ func cleanupTaggedSecurityGroups(ctx context.Context, client *ec2.Client, vpcID 
 	}
 
 	for _, sgID := range groupIDs {
-		const waitSecurityGroupRelease = true
+		const waitSecurityGroupRelease = false
 		if errDelete := deleteSecurityGroupByID(ctx, client, sgID, waitSecurityGroupRelease); errDelete != nil {
 			return fmt.Errorf("cleanup tagged security group %s: %w", sgID, errDelete)
 		}
