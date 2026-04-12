@@ -1029,6 +1029,10 @@ func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client,
 		return nil
 	}
 
+	if err := deleteSecurityGroupENIs(ctx, client, groupID); err != nil {
+		return fmt.Errorf("%s: delete ENIs for security group %s: %w", me, groupID, err)
+	}
+
 	if waitSecurityGroupRelease {
 		if err := waitForSecurityGroupRelease(ctx, client, groupID); err != nil {
 			return err
@@ -1067,6 +1071,51 @@ func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client,
 
 	return fmt.Errorf("%s: delete security group %s: dependency violation persisted after %d attempts: %w",
 		me, groupID, maxAttempts, lastErr)
+}
+
+func deleteSecurityGroupENIs(ctx context.Context, client *ec2.Client, groupID string) error {
+	const me = "deleteSecurityGroupENIs"
+
+	p := ec2.NewDescribeNetworkInterfacesPaginator(client,
+		&ec2.DescribeNetworkInterfacesInput{
+			Filters: []ec2types.Filter{{
+				Name:   aws.String("group-id"),
+				Values: []string{groupID},
+			}},
+		})
+
+	var interfaceIDs []string
+	for p.HasMorePages() {
+		page, errPage := p.NextPage(ctx)
+		if errPage != nil {
+			return fmt.Errorf("%s: describe network interfaces by security group %s: %w", me, groupID, errPage)
+		}
+
+		for _, networkInterface := range page.NetworkInterfaces {
+			interfaceID := aws.ToString(networkInterface.NetworkInterfaceId)
+			if interfaceID == "" {
+				continue
+			}
+			interfaceIDs = append(interfaceIDs, interfaceID)
+		}
+	}
+
+	for _, interfaceID := range interfaceIDs {
+		log.Printf("%s: deleting network interface: security_group_id=%s network_interface_id=%s",
+			me, groupID, interfaceID)
+
+		_, errDelete := client.DeleteNetworkInterface(ctx,
+			&ec2.DeleteNetworkInterfaceInput{NetworkInterfaceId: aws.String(interfaceID)})
+		if errDelete != nil {
+			if isAWSErrorCode(errDelete, "InvalidNetworkInterfaceID.NotFound") {
+				continue
+			}
+			log.Printf("%s: could not delete network interface: security_group_id=%s network_interface_id=%s error=%v",
+				me, groupID, interfaceID, errDelete)
+		}
+	}
+
+	return nil
 }
 
 func waitForSecurityGroupRelease(ctx context.Context, client *ec2.Client, groupID string) error {
