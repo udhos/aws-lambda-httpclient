@@ -70,7 +70,7 @@ func main() {
 	flag.StringVar(&parameters.runtime, "runtime", "provided.al2023", "Runtime for the Lambda function")
 	flag.StringVar(&parameters.envFile, "env-file", "samples/env.yaml", "Path to YAML file containing Lambda environment variables")
 	flag.StringVar(&parameters.lambdaRoleArn, "lambda-role-arn", "", "ARN of an existing IAM role to use for the Lambda function (if not provided, a new role will be created)")
-	flag.StringVar(&parameters.sgEgressEntries, "sg-egresss", defaultSgEgressEntries, "JSON egress rules for the Lambda function security group")
+	flag.StringVar(&parameters.sgEgressEntries, "sg-egress", defaultSgEgressEntries, "JSON egress rules for the Lambda function security group")
 	flag.IntVar(&parameters.logRetentionDays, "log-retention-days", 7, "Number of days to retain logs in CloudWatch")
 	flag.IntVar(&parameters.functionTimeoutInSeconds, "function-timeout", 10, "Timeout for the Lambda function in seconds")
 	flag.IntVar(&parameters.memoryInMB, "memory", 128, "Memory size for the Lambda function in MB")
@@ -809,6 +809,12 @@ func destroyLambda(parameters lambda) {
 	// delete lambda function
 
 	var errs []error
+	if parameters.vpcID != "" {
+		if err := switchLambdaToDefaultSecurityGroup(ctx, lambdaClient, ec2Client,
+			parameters.functionName, parameters.vpcID); err != nil {
+			errs = append(errs, err)
+		}
+	}
 
 	if err := deleteLambdaFunction(ctx, lambdaClient, parameters.functionName); err != nil {
 		errs = append(errs, err)
@@ -919,6 +925,92 @@ func deleteRole(ctx context.Context, client *iam.Client, roleName string) error 
 	return nil
 }
 
+func switchLambdaToDefaultSecurityGroup(ctx context.Context, lambdaClient *lambdasvc.Client,
+	ec2Client *ec2.Client, functionName, vpcID string) error {
+	log.Printf("switching lambda to default security group: function=%s vpc=%s", functionName, vpcID)
+
+	defaultSGID, errDefault := findDefaultSecurityGroupID(ctx, ec2Client, vpcID)
+	if errDefault != nil {
+		return fmt.Errorf("find default security group for vpc %s: %w", vpcID, errDefault)
+	}
+
+	if defaultSGID == "" {
+		return fmt.Errorf("default security group not found in vpc %s", vpcID)
+	}
+
+	for attempt := 1; attempt <= 10; attempt++ {
+		out, errGet := lambdaClient.GetFunction(ctx,
+			&lambdasvc.GetFunctionInput{FunctionName: aws.String(functionName)})
+		if errGet != nil {
+			var notFound *lambdatypes.ResourceNotFoundException
+			if errors.As(errGet, &notFound) {
+				return nil
+			}
+			return fmt.Errorf("get lambda function %s: %w", functionName, errGet)
+		}
+
+		cfg := out.Configuration
+		if cfg == nil || cfg.VpcConfig == nil || len(cfg.VpcConfig.SubnetIds) == 0 {
+			return nil
+		}
+
+		if len(cfg.VpcConfig.SecurityGroupIds) == 1 &&
+			cfg.VpcConfig.SecurityGroupIds[0] == defaultSGID {
+			return nil
+		}
+
+		_, errUpdate := lambdaClient.UpdateFunctionConfiguration(ctx,
+			&lambdasvc.UpdateFunctionConfigurationInput{
+				FunctionName: aws.String(functionName),
+				VpcConfig: &lambdatypes.VpcConfig{
+					SubnetIds:        cfg.VpcConfig.SubnetIds,
+					SecurityGroupIds: []string{defaultSGID},
+				},
+			})
+		if errUpdate != nil {
+			var conflict *lambdatypes.ResourceConflictException
+			if errors.As(errUpdate, &conflict) {
+				log.Printf("lambda update in progress while switching SG (attempt %d/10): function=%s",
+					attempt, functionName)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
+				continue
+			}
+			return fmt.Errorf("update lambda %s to default security group: %w", functionName, errUpdate)
+		}
+
+		if errWait := waitForLambdaUpdate(ctx, lambdaClient, functionName); errWait != nil {
+			return fmt.Errorf("wait for lambda update after security-group switch: %w", errWait)
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("could not switch lambda %s to default security group due to repeated update conflicts", functionName)
+}
+
+func findDefaultSecurityGroupID(ctx context.Context, client *ec2.Client, vpcID string) (string, error) {
+	out, errDescribe := client.DescribeSecurityGroups(ctx,
+		&ec2.DescribeSecurityGroupsInput{
+			Filters: []ec2types.Filter{
+				{Name: aws.String("vpc-id"), Values: []string{vpcID}},
+				{Name: aws.String("group-name"), Values: []string{"default"}},
+			},
+		})
+	if errDescribe != nil {
+		return "", errDescribe
+	}
+
+	if len(out.SecurityGroups) == 0 {
+		return "", nil
+	}
+
+	return aws.ToString(out.SecurityGroups[0].GroupId), nil
+}
+
 func deleteSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, groupName string) error {
 	log.Printf("deleting security group: vpc=%s name=%s", vpcID, groupName)
 
@@ -929,6 +1021,10 @@ func deleteSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, groupNa
 	if groupID == "" {
 		log.Printf("security group not found: vpc=%s name=%s", vpcID, groupName)
 		return nil
+	}
+
+	if err := waitForSecurityGroupRelease(ctx, client, groupID); err != nil {
+		return err
 	}
 
 	const maxAttempts = 30
@@ -963,6 +1059,45 @@ func deleteSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, groupNa
 
 	return fmt.Errorf("delete security group %s: dependency violation persisted after %d attempts: %w",
 		groupID, maxAttempts, lastErr)
+}
+
+func waitForSecurityGroupRelease(ctx context.Context, client *ec2.Client, groupID string) error {
+	const maxAttempts = 240
+	const pollInterval = 5 * time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		p := ec2.NewDescribeNetworkInterfacesPaginator(client,
+			&ec2.DescribeNetworkInterfacesInput{
+				Filters: []ec2types.Filter{{
+					Name:   aws.String("group-id"),
+					Values: []string{groupID},
+				}},
+			})
+
+		count := 0
+		for p.HasMorePages() {
+			page, errPage := p.NextPage(ctx)
+			if errPage != nil {
+				return fmt.Errorf("describe network interfaces by security group %s: %w", groupID, errPage)
+			}
+			count += len(page.NetworkInterfaces)
+		}
+
+		if count == 0 {
+			return nil
+		}
+
+		log.Printf("security group still attached to %d network interface(s) (attempt %d/%d): id=%s",
+			count, attempt, maxAttempts, groupID)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+
+	return fmt.Errorf("security group %s still attached to network interfaces after waiting", groupID)
 }
 
 func deleteLogGroup(ctx context.Context, client *cloudwatchlogs.Client, functionName string) error {
