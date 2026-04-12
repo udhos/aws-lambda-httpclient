@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,6 +40,7 @@ type lambda struct {
 	runtime                  string
 	envFile                  string
 	lambdaRoleArn            string
+	sgEgressEntries          string
 	logRetentionDays         int
 	functionTimeoutInSeconds int
 	memoryInMB               int
@@ -47,6 +49,8 @@ type lambda struct {
 }
 
 const programVersion = "0.0.1"
+
+const defaultSgEgressEntries = `[{"proto":"tcp","FromPort":80,"ToPort":80,"Ip":["0.0.0.0/0"],"Ipv6":["::/0"]},{"proto":"tcp","FromPort":443,"ToPort":443,"Ip":["0.0.0.0/0"],"Ipv6":["::/0"]}]`
 
 func main() {
 	const me = "aws-lambda-httpclient-deploy"
@@ -66,6 +70,7 @@ func main() {
 	flag.StringVar(&parameters.runtime, "runtime", "provided.al2023", "Runtime for the Lambda function")
 	flag.StringVar(&parameters.envFile, "env-file", "samples/env.yaml", "Path to YAML file containing Lambda environment variables")
 	flag.StringVar(&parameters.lambdaRoleArn, "lambda-role-arn", "", "ARN of an existing IAM role to use for the Lambda function (if not provided, a new role will be created)")
+	flag.StringVar(&parameters.sgEgressEntries, "sg-egresss", defaultSgEgressEntries, "JSON egress rules for the Lambda function security group")
 	flag.IntVar(&parameters.logRetentionDays, "log-retention-days", 7, "Number of days to retain logs in CloudWatch")
 	flag.IntVar(&parameters.functionTimeoutInSeconds, "function-timeout", 10, "Timeout for the Lambda function in seconds")
 	flag.IntVar(&parameters.memoryInMB, "memory", 128, "Memory size for the Lambda function in MB")
@@ -114,7 +119,7 @@ func deployLambda(parameters lambda) {
 	if parameters.vpcID != "" {
 		securityGroupName := parameters.functionName
 		sgID, errSG := ensureSecurityGroup(ctx, ec2Client,
-			parameters.vpcID, securityGroupName)
+			parameters.vpcID, securityGroupName, parameters.sgEgressEntries)
 		if errSG != nil {
 			log.Fatalf("ensure security group: %v", errSG)
 		}
@@ -211,7 +216,7 @@ func loadEnvVars(path string) (map[string]string, error) {
 }
 
 func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
-	groupName string) (string, error) {
+	groupName, sgEgressEntries string) (string, error) {
 
 	log.Printf("ensuring security group: vpc=%s name=%s", vpcID, groupName)
 
@@ -273,29 +278,9 @@ func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
 		}
 	}
 
-	egressRules := []ec2types.IpPermission{
-		{
-			IpProtocol: aws.String("tcp"),
-			FromPort:   aws.Int32(80),
-			ToPort:     aws.Int32(80),
-			IpRanges: []ec2types.IpRange{
-				{CidrIp: aws.String("0.0.0.0/0")},
-			},
-			Ipv6Ranges: []ec2types.Ipv6Range{
-				{CidrIpv6: aws.String("::/0")},
-			},
-		},
-		{
-			IpProtocol: aws.String("tcp"),
-			FromPort:   aws.Int32(443),
-			ToPort:     aws.Int32(443),
-			IpRanges: []ec2types.IpRange{
-				{CidrIp: aws.String("0.0.0.0/0")},
-			},
-			Ipv6Ranges: []ec2types.Ipv6Range{
-				{CidrIpv6: aws.String("::/0")},
-			},
-		},
+	egressRules, errParse := parseSgEgressEntries(sgEgressEntries)
+	if errParse != nil {
+		return "", fmt.Errorf("parse security group egress entries: %w", errParse)
 	}
 
 	_, errAuthorize := client.AuthorizeSecurityGroupEgress(ctx,
@@ -309,6 +294,48 @@ func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
 	}
 
 	return groupID, nil
+}
+
+type sgEgressEntry struct {
+	Proto    string   `json:"proto"`
+	FromPort *int32   `json:"FromPort"`
+	ToPort   *int32   `json:"ToPort"`
+	IP       []string `json:"Ip"`
+	IPv6     []string `json:"Ipv6"`
+}
+
+func parseSgEgressEntries(raw string) ([]ec2types.IpPermission, error) {
+	var entries []sgEgressEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, err
+	}
+
+	ipPermissions := make([]ec2types.IpPermission, 0, len(entries))
+	for _, e := range entries {
+		perm := ec2types.IpPermission{
+			IpProtocol: aws.String(e.Proto),
+			FromPort:   e.FromPort,
+			ToPort:     e.ToPort,
+		}
+
+		if len(e.IP) > 0 {
+			perm.IpRanges = make([]ec2types.IpRange, 0, len(e.IP))
+			for _, cidr := range e.IP {
+				perm.IpRanges = append(perm.IpRanges, ec2types.IpRange{CidrIp: aws.String(cidr)})
+			}
+		}
+
+		if len(e.IPv6) > 0 {
+			perm.Ipv6Ranges = make([]ec2types.Ipv6Range, 0, len(e.IPv6))
+			for _, cidr := range e.IPv6 {
+				perm.Ipv6Ranges = append(perm.Ipv6Ranges, ec2types.Ipv6Range{CidrIpv6: aws.String(cidr)})
+			}
+		}
+
+		ipPermissions = append(ipPermissions, perm)
+	}
+
+	return ipPermissions, nil
 }
 
 func findSecurityGroupID(ctx context.Context, client *ec2.Client, vpcID,
