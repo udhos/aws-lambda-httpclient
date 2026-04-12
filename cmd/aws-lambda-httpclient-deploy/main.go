@@ -588,8 +588,13 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	_, errGet := client.GetFunction(ctx,
 		&lambdasvc.GetFunctionInput{FunctionName: aws.String(functionName)})
 	if errGet != nil {
+
+		log.Printf("get lambda function: name=%s: error: %v", functionName, errGet)
+
 		var notFound *lambdatypes.ResourceNotFoundException
 		if errors.As(errGet, &notFound) {
+
+			log.Printf("creating lambda function: name=%s", functionName)
 
 			input := &lambdasvc.CreateFunctionInput{
 				Architectures: []lambdatypes.Architecture{lambdatypes.Architecture(architecture)},
@@ -618,6 +623,8 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 		return fmt.Errorf("get function: %w", errGet)
 	}
 
+	log.Printf("updating lambda function code: name=%s", functionName)
+
 	_, errCode := client.UpdateFunctionCode(ctx, &lambdasvc.UpdateFunctionCodeInput{
 		FunctionName: aws.String(functionName),
 		ZipFile:      zipBytes,
@@ -625,6 +632,8 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	if errCode != nil {
 		return fmt.Errorf("update function code: %w", errCode)
 	}
+
+	log.Printf("updating lambda function configuration: name=%s", functionName)
 
 	input := &lambdasvc.UpdateFunctionConfigurationInput{
 		FunctionName: aws.String(functionName),
