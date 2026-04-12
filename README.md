@@ -123,10 +123,6 @@ the command-line using `aws-lambda-httpclient-deploy`.
 
 Just run `aws-lambda-httpclient-deploy` and it will create everything for you.
 
-If the program hits any error during deployment, just try again.
-Some errors are expected when resources are being created for the first time,
-but they should be resolved in subsequent runs.
-
 ```bash
 $ aws-lambda-httpclient-deploy
 2026/04/10 23:21:05 ensuring role: name=aws-lambda-httpclient

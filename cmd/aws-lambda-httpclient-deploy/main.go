@@ -809,6 +809,12 @@ func destroyLambda(parameters lambda) {
 	// delete lambda function
 
 	var errs []error
+	securityGroupID, errSGID := getLambdaPrimarySecurityGroupID(ctx, lambdaClient,
+		parameters.functionName)
+	if errSGID != nil {
+		errs = append(errs, errSGID)
+	}
+
 	if parameters.vpcID != "" {
 		if err := switchLambdaToDefaultSecurityGroup(ctx, lambdaClient, ec2Client,
 			parameters.functionName, parameters.vpcID); err != nil {
@@ -832,14 +838,13 @@ func destroyLambda(parameters lambda) {
 		errs = append(errs, err)
 	}
 
-	// delete security group if vpc id was provided
-
-	if parameters.vpcID != "" {
-		if err := deleteSecurityGroup(ctx, ec2Client, parameters.vpcID, parameters.functionName); err != nil {
+	// delete the security group that was attached to the lambda before deletion
+	if securityGroupID != "" {
+		if err := deleteSecurityGroupByID(ctx, ec2Client, securityGroupID); err != nil {
 			errs = append(errs, err)
 		}
 	} else {
-		log.Printf("skipping security group deletion because -vpc-id was not provided")
+		log.Printf("skipping security group deletion because no security group was attached to the lambda")
 	}
 
 	// delete cloudwatch log group
@@ -925,6 +930,33 @@ func deleteRole(ctx context.Context, client *iam.Client, roleName string) error 
 	return nil
 }
 
+func getLambdaPrimarySecurityGroupID(ctx context.Context, client *lambdasvc.Client, functionName string) (string, error) {
+	out, errGet := client.GetFunction(ctx,
+		&lambdasvc.GetFunctionInput{FunctionName: aws.String(functionName)})
+
+	var sgID string
+
+	defer func() {
+		log.Printf("getLambdaPrimarySecurityGroupID: function=%s security_group_id=%q error=%v", functionName, sgID, errGet)
+	}()
+
+	if errGet != nil {
+		if _, ok := errors.AsType[*lambdatypes.ResourceNotFoundException](errGet); ok {
+			return "", nil
+		}
+		return "", fmt.Errorf("get lambda function %s to read security groups: %w", functionName, errGet)
+	}
+
+	if out.Configuration == nil || out.Configuration.VpcConfig == nil ||
+		len(out.Configuration.VpcConfig.SecurityGroupIds) == 0 {
+		return "", nil
+	}
+
+	sgID = out.Configuration.VpcConfig.SecurityGroupIds[0]
+
+	return sgID, nil
+}
+
 func switchLambdaToDefaultSecurityGroup(ctx context.Context, lambdaClient *lambdasvc.Client,
 	ec2Client *ec2.Client, functionName, vpcID string) error {
 	log.Printf("switching lambda to default security group: function=%s vpc=%s", functionName, vpcID)
@@ -938,7 +970,10 @@ func switchLambdaToDefaultSecurityGroup(ctx context.Context, lambdaClient *lambd
 		return fmt.Errorf("default security group not found in vpc %s", vpcID)
 	}
 
-	for attempt := 1; attempt <= 10; attempt++ {
+	const maxAttempts = 30
+	const retryInterval = 2 * time.Second
+
+	for attempt := range maxAttempts {
 		out, errGet := lambdaClient.GetFunction(ctx,
 			&lambdasvc.GetFunctionInput{FunctionName: aws.String(functionName)})
 		if errGet != nil {
@@ -968,14 +1003,13 @@ func switchLambdaToDefaultSecurityGroup(ctx context.Context, lambdaClient *lambd
 				},
 			})
 		if errUpdate != nil {
-			var conflict *lambdatypes.ResourceConflictException
-			if errors.As(errUpdate, &conflict) {
-				log.Printf("lambda update in progress while switching SG (attempt %d/10): function=%s",
-					attempt, functionName)
+			if _, ok := errors.AsType[*lambdatypes.ResourceConflictException](errUpdate); ok {
+				log.Printf("lambda update in progress while switching SG (attempt %d/%d): function=%s",
+					attempt, maxAttempts, functionName)
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case <-time.After(2 * time.Second):
+				case <-time.After(retryInterval):
 				}
 				continue
 			}
@@ -1011,15 +1045,26 @@ func findDefaultSecurityGroupID(ctx context.Context, client *ec2.Client, vpcID s
 	return aws.ToString(out.SecurityGroups[0].GroupId), nil
 }
 
-func deleteSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, groupName string) error {
-	log.Printf("deleting security group: vpc=%s name=%s", vpcID, groupName)
+func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client, groupID string) error {
+	log.Printf("deleting security group: id=%s", groupID)
 
-	groupID, errFind := findSecurityGroupID(ctx, client, vpcID, groupName)
-	if errFind != nil {
-		return fmt.Errorf("find security group for deletion: %w", errFind)
+	describeOut, errDescribe := client.DescribeSecurityGroups(ctx,
+		&ec2.DescribeSecurityGroupsInput{GroupIds: []string{groupID}})
+	if errDescribe != nil {
+		if isAWSErrorCode(errDescribe, "InvalidGroup.NotFound") {
+			log.Printf("security group already deleted: id=%s", groupID)
+			return nil
+		}
+		return fmt.Errorf("describe security group %s before deletion: %w", groupID, errDescribe)
 	}
-	if groupID == "" {
-		log.Printf("security group not found: vpc=%s name=%s", vpcID, groupName)
+
+	if len(describeOut.SecurityGroups) == 0 {
+		log.Printf("security group already deleted: id=%s", groupID)
+		return nil
+	}
+
+	if aws.ToString(describeOut.SecurityGroups[0].GroupName) == "default" {
+		log.Printf("skipping deletion of default security group: id=%s", groupID)
 		return nil
 	}
 
