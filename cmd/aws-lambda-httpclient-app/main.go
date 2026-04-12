@@ -10,12 +10,14 @@ import (
 
 func main() {
 
+	const me = "aws-lambda-httpclient"
+
 	var version bool
 	flag.BoolVar(&version, "version", false, "show version")
 	flag.Parse()
 
 	if version {
-		fmt.Printf("version %s\n", handler.Version)
+		fmt.Printf("%s version %s\n", me, handler.Version)
 		return
 	}
 

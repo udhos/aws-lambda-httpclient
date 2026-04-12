@@ -45,8 +45,15 @@ type lambda struct {
 	destroy                  bool
 }
 
+const programVersion = "0.0.1"
+
 func main() {
+	const me = "aws-lambda-httpclient-deploy"
+
+	fmt.Printf("%s version %s\n", me, programVersion)
+
 	var parameters lambda
+	var showVersion bool
 
 	flag.StringVar(&parameters.functionName, "function-name", "aws-lambda-httpclient", "The name of the AWS Lambda function")
 	flag.StringVar(&parameters.vpcID, "vpc-id", "", "The ID of the VPC to deploy the Lambda function in")
@@ -63,8 +70,13 @@ func main() {
 	flag.IntVar(&parameters.memoryInMB, "memory", 128, "Memory size for the Lambda function in MB")
 	flag.BoolVar(&parameters.createKmsKey, "create-kms-key", false, "Whether to create a KMS key for the Lambda function")
 	flag.BoolVar(&parameters.destroy, "destroy", false, "Whether to destroy the deployed Lambda function")
+	flag.BoolVar(&showVersion, "version", false, "Show program version")
 
 	flag.Parse()
+
+	if showVersion {
+		return
+	}
 
 	if parameters.destroy {
 		destroyLambda(parameters)
