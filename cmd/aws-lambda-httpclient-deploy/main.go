@@ -1095,6 +1095,8 @@ func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client,
 
 func deleteSecurityGroupENIs(ctx context.Context, client *ec2.Client, groupID string) error {
 	const me = "deleteSecurityGroupENIs"
+	const maxAttempts = 10
+	const retryInterval = 2 * time.Second
 
 	p := ec2.NewDescribeNetworkInterfacesPaginator(client,
 		&ec2.DescribeNetworkInterfacesInput{
@@ -1121,21 +1123,49 @@ func deleteSecurityGroupENIs(ctx context.Context, client *ec2.Client, groupID st
 	}
 
 	for _, interfaceID := range interfaceIDs {
-		log.Printf("%s: deleting network interface: security_group_id=%s network_interface_id=%s",
-			me, groupID, interfaceID)
+		for attempt := range maxAttempts {
+			log.Printf("%s: deleting network interface (attempt %d/%d): security_group_id=%s network_interface_id=%s",
+				me, attempt+1, maxAttempts, groupID, interfaceID)
 
-		_, errDelete := client.DeleteNetworkInterface(ctx,
-			&ec2.DeleteNetworkInterfaceInput{NetworkInterfaceId: aws.String(interfaceID)})
-		if errDelete != nil {
-			if isAWSErrorCode(errDelete, "InvalidNetworkInterfaceID.NotFound") {
-				continue
+			_, errDelete := client.DeleteNetworkInterface(ctx,
+				&ec2.DeleteNetworkInterfaceInput{NetworkInterfaceId: aws.String(interfaceID)})
+			if errDelete == nil || isAWSErrorCode(errDelete, "InvalidNetworkInterfaceID.NotFound") {
+				break
 			}
-			log.Printf("%s: could not delete network interface: security_group_id=%s network_interface_id=%s error=%v",
-				me, groupID, interfaceID, errDelete)
+
+			if !isRetryableENIDeleteError(errDelete) {
+				log.Printf("%s: could not delete network interface: security_group_id=%s network_interface_id=%s error=%v",
+					me, groupID, interfaceID, errDelete)
+				break
+			}
+
+			if attempt == maxAttempts-1 {
+				log.Printf("%s: giving up deleting network interface after %d attempts: security_group_id=%s network_interface_id=%s error=%v",
+					me, maxAttempts, groupID, interfaceID, errDelete)
+				break
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryInterval):
+			}
 		}
 	}
 
 	return nil
+}
+
+func isRetryableENIDeleteError(err error) bool {
+	if isAWSErrorCode(err, "InvalidParameterValue", "OperationNotPermitted") {
+		errText := strings.ToLower(err.Error())
+		return strings.Contains(errText, "currently in use") ||
+			strings.Contains(errText, "in use") ||
+			strings.Contains(errText, "being used") ||
+			strings.Contains(errText, "currently attached")
+	}
+
+	return false
 }
 
 func waitForSecurityGroupRelease(ctx context.Context, client *ec2.Client, groupID string) error {
