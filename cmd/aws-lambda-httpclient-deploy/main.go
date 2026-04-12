@@ -243,6 +243,26 @@ func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
 	}
 	groupID := aws.ToString(createOut.GroupId)
 
+	describeOut, errDescribe := client.DescribeSecurityGroups(ctx,
+		&ec2.DescribeSecurityGroupsInput{GroupIds: []string{groupID}})
+	if errDescribe != nil {
+		return "", fmt.Errorf("describe security group %s: %w", groupID, errDescribe)
+	}
+	if len(describeOut.SecurityGroups) == 0 {
+		return "", fmt.Errorf("security group %s not found after create", groupID)
+	}
+
+	if len(describeOut.SecurityGroups[0].IpPermissionsEgress) > 0 {
+		_, errRevoke := client.RevokeSecurityGroupEgress(ctx,
+			&ec2.RevokeSecurityGroupEgressInput{
+				GroupId:       aws.String(groupID),
+				IpPermissions: describeOut.SecurityGroups[0].IpPermissionsEgress,
+			})
+		if errRevoke != nil {
+			return "", fmt.Errorf("revoke egress rules from security group %s: %w", groupID, errRevoke)
+		}
+	}
+
 	egressRules, errParse := parseSgEgressEntries(sgEgressEntries)
 	if errParse != nil {
 		return "", fmt.Errorf("parse security group egress entries: %w", errParse)
