@@ -845,10 +845,6 @@ func destroyLambda(parameters lambda) {
 		log.Printf("skipping security group deletion because no security group was attached to the lambda")
 	}
 
-	if err := cleanupTaggedSecurityGroups(ctx, ec2Client, parameters.vpcID); err != nil {
-		errs = append(errs, err)
-	}
-
 	// report errors if any
 
 	if len(errs) > 0 {
@@ -1071,45 +1067,6 @@ func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client,
 
 	return fmt.Errorf("%s: delete security group %s: dependency violation persisted after %d attempts: %w",
 		me, groupID, maxAttempts, lastErr)
-}
-
-func cleanupTaggedSecurityGroups(ctx context.Context, client *ec2.Client, vpcID string) error {
-	filters := []ec2types.Filter{{
-		Name:   aws.String("tag:" + securityGroupTagKey),
-		Values: []string{securityGroupTagValue},
-	}}
-	if vpcID != "" {
-		filters = append(filters, ec2types.Filter{
-			Name:   aws.String("vpc-id"),
-			Values: []string{vpcID},
-		})
-	}
-
-	p := ec2.NewDescribeSecurityGroupsPaginator(client,
-		&ec2.DescribeSecurityGroupsInput{Filters: filters})
-
-	var groupIDs []string
-
-	for p.HasMorePages() {
-		page, errPage := p.NextPage(ctx)
-		if errPage != nil {
-			return fmt.Errorf("cleanup tagged security groups: describe groups: %w", errPage)
-		}
-
-		for _, sg := range page.SecurityGroups {
-			sgID := aws.ToString(sg.GroupId)
-			groupIDs = append(groupIDs, sgID)
-		}
-	}
-
-	for _, sgID := range groupIDs {
-		const waitSecurityGroupRelease = false
-		if errDelete := deleteSecurityGroupByID(ctx, client, sgID, waitSecurityGroupRelease); errDelete != nil {
-			return fmt.Errorf("cleanup tagged security group %s: %w", sgID, errDelete)
-		}
-	}
-
-	return nil
 }
 
 func waitForSecurityGroupRelease(ctx context.Context, client *ec2.Client, groupID string) error {
