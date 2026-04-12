@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -633,6 +634,12 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 		return fmt.Errorf("update function code: %w", errCode)
 	}
 
+	// Wait for the code update to complete before updating configuration
+	log.Printf("waiting for lambda code update to complete: name=%s", functionName)
+	if err := waitForLambdaUpdate(ctx, client, functionName); err != nil {
+		return fmt.Errorf("wait for code update: %w", err)
+	}
+
 	log.Printf("updating lambda function configuration: name=%s", functionName)
 
 	input := &lambdasvc.UpdateFunctionConfigurationInput{
@@ -657,6 +664,38 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	}
 
 	return nil
+}
+
+// waitForLambdaUpdate polls the Lambda function until it's in Active state
+// This ensures code updates are complete before attempting configuration updates
+func waitForLambdaUpdate(ctx context.Context, client *lambdasvc.Client, functionName string) error {
+	maxAttempts := 60
+	pollInterval := time.Second
+
+	for attempt := range maxAttempts {
+		resp, err := client.GetFunction(ctx, &lambdasvc.GetFunctionInput{
+			FunctionName: aws.String(functionName),
+		})
+		if err != nil {
+			return fmt.Errorf("get function: %w", err)
+		}
+
+		if resp.Configuration != nil && resp.Configuration.State == lambdatypes.StateActive {
+			log.Printf("lambda function is active: name=%s", functionName)
+			return nil
+		}
+
+		log.Printf("lambda function updating (attempt %d/%d): name=%s, state=%v",
+			attempt+1, maxAttempts, functionName, resp.Configuration.State)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+
+	return fmt.Errorf("lambda function did not reach Active state within %v seconds", maxAttempts)
 }
 
 func ensureLogGroup(ctx context.Context, client *cloudwatchlogs.Client,
