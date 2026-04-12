@@ -239,16 +239,15 @@ func loadEnvVars(path string) (map[string]string, error) {
 func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
 	groupName, sgEgressEntries string) (string, error) {
 
-	newGroupName := fmt.Sprintf("%s-%s", groupName, time.Now().UTC().Format("2006-01-02-15-04-05"))
 	createdAt := time.Now().UTC().Format(time.RFC3339)
 	description := fmt.Sprintf("%s created at %s", groupName, createdAt)
 
-	log.Printf("creating security group: vpc=%s name=%s", vpcID, newGroupName)
+	log.Printf("creating security group: vpc=%s name=%s", vpcID, groupName)
 
 	createOut, errCreate := client.CreateSecurityGroup(ctx,
 		&ec2.CreateSecurityGroupInput{
 			Description: aws.String(description),
-			GroupName:   aws.String(newGroupName),
+			GroupName:   aws.String(groupName),
 			VpcId:       aws.String(vpcID),
 			TagSpecifications: []ec2types.TagSpecification{{
 				ResourceType: ec2types.ResourceTypeSecurityGroup,
@@ -581,8 +580,7 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 
 		log.Printf("get lambda function: name=%s: error: %v", functionName, errGet)
 
-		var notFound *lambdatypes.ResourceNotFoundException
-		if errors.As(errGet, &notFound) {
+		if _, ok := errors.AsType[*lambdatypes.ResourceNotFoundException](errGet); ok {
 
 			log.Printf("creating lambda function: name=%s", functionName)
 
@@ -995,8 +993,7 @@ func switchLambdaToDefaultSecurityGroup(ctx context.Context, lambdaClient *lambd
 		out, errGet := lambdaClient.GetFunction(ctx,
 			&lambdasvc.GetFunctionInput{FunctionName: aws.String(functionName)})
 		if errGet != nil {
-			var notFound *lambdatypes.ResourceNotFoundException
-			if errors.As(errGet, &notFound) {
+			if _, ok := errors.AsType[*lambdatypes.ResourceNotFoundException](errGet); ok {
 				return nil
 			}
 			return fmt.Errorf("get lambda function %s: %w", functionName, errGet)
