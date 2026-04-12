@@ -117,16 +117,8 @@ func deployLambda(parameters lambda) {
 	// ensure security group
 
 	var securityGroupID string
-	var oldSecurityGroupID string
 
 	if parameters.vpcID != "" {
-		oldSGID, errOldSG := getLambdaPrimarySecurityGroupID(ctx, lambdaClient,
-			parameters.functionName)
-		if errOldSG != nil {
-			log.Fatalf("get lambda security group: %v", errOldSG)
-		}
-		oldSecurityGroupID = oldSGID
-
 		securityGroupName := parameters.functionName
 		sgID, errSG := ensureSecurityGroup(ctx, ec2Client,
 			parameters.vpcID, securityGroupName, parameters.sgEgressEntries)
@@ -193,17 +185,6 @@ func deployLambda(parameters lambda) {
 		envVars, kmsKeyARN)
 	if errLambda != nil {
 		log.Fatalf("ensure lambda: %v", errLambda)
-	}
-
-	if oldSecurityGroupID != "" && oldSecurityGroupID != securityGroupID {
-		const waitSecurityGroupRelease = false
-		errDeleteOld := deleteSecurityGroupByID(ctx, ec2Client,
-			oldSecurityGroupID, waitSecurityGroupRelease)
-
-		if errDeleteOld != nil {
-			log.Printf("ERROR: delete old lambda security group %s: %v",
-				oldSecurityGroupID, errDeleteOld)
-		}
 	}
 
 	// ensure cloudwatch log group
