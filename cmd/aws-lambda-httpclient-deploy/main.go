@@ -847,6 +847,12 @@ func destroyLambda(parameters lambda) {
 		errs = append(errs, err)
 	}
 
+	// delete cloudwatch log group
+
+	if err := deleteLogGroup(ctx, logsClient, parameters.functionName); err != nil {
+		errs = append(errs, err)
+	}
+
 	// delete the security group that was attached to the lambda before deletion
 	if securityGroupID != "" {
 		const waitSecurityGroupRelease = true
@@ -859,12 +865,6 @@ func destroyLambda(parameters lambda) {
 	}
 
 	if err := cleanupTaggedSecurityGroups(ctx, ec2Client, parameters.vpcID); err != nil {
-		errs = append(errs, err)
-	}
-
-	// delete cloudwatch log group
-
-	if err := deleteLogGroup(ctx, logsClient, parameters.functionName); err != nil {
 		errs = append(errs, err)
 	}
 
