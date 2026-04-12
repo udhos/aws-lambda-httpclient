@@ -666,10 +666,10 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	return nil
 }
 
-// waitForLambdaUpdate polls the Lambda function until it's in Active state
+// waitForLambdaUpdate polls the Lambda function until it's in Active state with successful update
 // This ensures code updates are complete before attempting configuration updates
 func waitForLambdaUpdate(ctx context.Context, client *lambdasvc.Client, functionName string) error {
-	maxAttempts := 60
+	maxAttempts := 120
 	pollInterval := time.Second
 
 	for attempt := range maxAttempts {
@@ -680,13 +680,15 @@ func waitForLambdaUpdate(ctx context.Context, client *lambdasvc.Client, function
 			return fmt.Errorf("get function: %w", err)
 		}
 
-		if resp.Configuration != nil && resp.Configuration.State == lambdatypes.StateActive {
-			log.Printf("lambda function is active: name=%s", functionName)
+		if resp.Configuration != nil &&
+			resp.Configuration.State == lambdatypes.StateActive &&
+			resp.Configuration.LastUpdateStatus == lambdatypes.LastUpdateStatusSuccessful {
+			log.Printf("lambda function is active with successful update: name=%s", functionName)
 			return nil
 		}
 
-		log.Printf("lambda function updating (attempt %d/%d): name=%s, state=%v",
-			attempt+1, maxAttempts, functionName, resp.Configuration.State)
+		log.Printf("lambda function updating (attempt %d/%d): name=%s, state=%v, lastUpdateStatus=%v",
+			attempt+1, maxAttempts, functionName, resp.Configuration.State, resp.Configuration.LastUpdateStatus)
 
 		select {
 		case <-ctx.Done():
@@ -695,7 +697,7 @@ func waitForLambdaUpdate(ctx context.Context, client *lambdasvc.Client, function
 		}
 	}
 
-	return fmt.Errorf("lambda function did not reach Active state within %v seconds", maxAttempts)
+	return fmt.Errorf("lambda function did not reach Active state with Successful update within %v seconds", maxAttempts)
 }
 
 func ensureLogGroup(ctx context.Context, client *cloudwatchlogs.Client,
