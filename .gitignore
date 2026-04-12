@@ -31,6 +31,8 @@ go.work.sum
 # .idea/
 # .vscode/
 
+aws-lambda-httpclient
+aws-lambda-httpclient-app
+aws-lambda-httpclient-deploy
 bootstrap
-
 lambda.zip

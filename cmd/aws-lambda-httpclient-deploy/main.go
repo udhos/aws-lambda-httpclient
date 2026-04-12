@@ -615,7 +615,10 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 				input.KMSKeyArn = aws.String(kmsKeyARN)
 			}
 
-			_, errCreate := client.CreateFunction(ctx, input)
+			errCreate := retryOnRoleNotReady(ctx, func() error {
+				_, err := client.CreateFunction(ctx, input)
+				return err
+			})
 			if errCreate != nil {
 				return fmt.Errorf("create function: %w", errCreate)
 			}
@@ -666,11 +669,37 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	return nil
 }
 
+// retryOnRoleNotReady retries the given operation when AWS returns an error indicating the IAM role
+// is not yet assumable by Lambda. This is needed because IAM changes are eventually consistent.
+func retryOnRoleNotReady(ctx context.Context, op func() error) error {
+	const retryInterval = 2 * time.Second
+	const maxAttempts = 10
+	const roleNotReadyMsg = "The role defined for the function cannot be assumed by Lambda"
+
+	for attempt := range maxAttempts {
+		err := op()
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(err.Error(), roleNotReadyMsg) {
+			return err
+		}
+		log.Printf("role not yet ready, retrying (attempt %d/%d)...", attempt+1, maxAttempts)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
+	}
+
+	return fmt.Errorf("role did not become assumable by Lambda after %d attempts", maxAttempts)
+}
+
 // waitForLambdaUpdate polls the Lambda function until it's in Active state with successful update
 // This ensures code updates are complete before attempting configuration updates
 func waitForLambdaUpdate(ctx context.Context, client *lambdasvc.Client, functionName string) error {
-	maxAttempts := 120
-	pollInterval := time.Second
+	maxAttempts := 60
+	pollInterval := 2 * time.Second
 
 	for attempt := range maxAttempts {
 		resp, err := client.GetFunction(ctx, &lambdasvc.GetFunctionInput{
