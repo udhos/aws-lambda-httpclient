@@ -826,8 +826,7 @@ func destroyLambda(parameters lambda) {
 	}
 
 	if parameters.vpcID != "" {
-		if err := switchLambdaToDefaultSecurityGroup(ctx, lambdaClient, ec2Client,
-			parameters.functionName, parameters.vpcID); err != nil {
+		if err := removeLambdaVPCConfig(ctx, lambdaClient, parameters.functionName); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -973,18 +972,8 @@ func getLambdaPrimarySecurityGroupID(ctx context.Context, client *lambdasvc.Clie
 	return sgID, nil
 }
 
-func switchLambdaToDefaultSecurityGroup(ctx context.Context, lambdaClient *lambdasvc.Client,
-	ec2Client *ec2.Client, functionName, vpcID string) error {
-	log.Printf("switching lambda to default security group: function=%s vpc=%s", functionName, vpcID)
-
-	defaultSGID, errDefault := findDefaultSecurityGroupID(ctx, ec2Client, vpcID)
-	if errDefault != nil {
-		return fmt.Errorf("find default security group for vpc %s: %w", vpcID, errDefault)
-	}
-
-	if defaultSGID == "" {
-		return fmt.Errorf("default security group not found in vpc %s", vpcID)
-	}
+func removeLambdaVPCConfig(ctx context.Context, lambdaClient *lambdasvc.Client, functionName string) error {
+	log.Printf("removing lambda vpc config: function=%s", functionName)
 
 	const maxAttempts = 30
 	const retryInterval = 2 * time.Second
@@ -1004,22 +993,17 @@ func switchLambdaToDefaultSecurityGroup(ctx context.Context, lambdaClient *lambd
 			return nil
 		}
 
-		if len(cfg.VpcConfig.SecurityGroupIds) == 1 &&
-			cfg.VpcConfig.SecurityGroupIds[0] == defaultSGID {
-			return nil
-		}
-
 		_, errUpdate := lambdaClient.UpdateFunctionConfiguration(ctx,
 			&lambdasvc.UpdateFunctionConfigurationInput{
 				FunctionName: aws.String(functionName),
 				VpcConfig: &lambdatypes.VpcConfig{
-					SubnetIds:        cfg.VpcConfig.SubnetIds,
-					SecurityGroupIds: []string{defaultSGID},
+					SubnetIds:        []string{},
+					SecurityGroupIds: []string{},
 				},
 			})
 		if errUpdate != nil {
 			if _, ok := errors.AsType[*lambdatypes.ResourceConflictException](errUpdate); ok {
-				log.Printf("lambda update in progress while switching SG (attempt %d/%d): function=%s",
+				log.Printf("lambda update in progress while removing vpc config (attempt %d/%d): function=%s",
 					attempt, maxAttempts, functionName)
 				select {
 				case <-ctx.Done():
@@ -1028,36 +1012,17 @@ func switchLambdaToDefaultSecurityGroup(ctx context.Context, lambdaClient *lambd
 				}
 				continue
 			}
-			return fmt.Errorf("update lambda %s to default security group: %w", functionName, errUpdate)
+			return fmt.Errorf("remove vpc config from lambda %s: %w", functionName, errUpdate)
 		}
 
 		if errWait := waitForLambdaUpdate(ctx, lambdaClient, functionName); errWait != nil {
-			return fmt.Errorf("wait for lambda update after security-group switch: %w", errWait)
+			return fmt.Errorf("wait for lambda update after vpc config removal: %w", errWait)
 		}
 
 		return nil
 	}
 
-	return fmt.Errorf("could not switch lambda %s to default security group due to repeated update conflicts", functionName)
-}
-
-func findDefaultSecurityGroupID(ctx context.Context, client *ec2.Client, vpcID string) (string, error) {
-	out, errDescribe := client.DescribeSecurityGroups(ctx,
-		&ec2.DescribeSecurityGroupsInput{
-			Filters: []ec2types.Filter{
-				{Name: aws.String("vpc-id"), Values: []string{vpcID}},
-				{Name: aws.String("group-name"), Values: []string{"default"}},
-			},
-		})
-	if errDescribe != nil {
-		return "", errDescribe
-	}
-
-	if len(out.SecurityGroups) == 0 {
-		return "", nil
-	}
-
-	return aws.ToString(out.SecurityGroups[0].GroupId), nil
+	return fmt.Errorf("could not remove vpc config from lambda %s due to repeated update conflicts", functionName)
 }
 
 func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client,
