@@ -49,6 +49,8 @@ type lambda struct {
 }
 
 const programVersion = "0.0.1"
+const securityGroupTagKey = "created-by"
+const securityGroupTagValue = "aws-lambda-httpclient"
 
 const defaultSgEgressEntries = `[{"proto":"tcp","FromPort":80,"ToPort":80,"Ip":["0.0.0.0/0"],"Ipv6":["::/0"]},{"proto":"tcp","FromPort":443,"ToPort":443,"Ip":["0.0.0.0/0"],"Ipv6":["::/0"]}]`
 
@@ -237,14 +239,24 @@ func loadEnvVars(path string) (map[string]string, error) {
 func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
 	groupName, sgEgressEntries string) (string, error) {
 
-	newGroupName := fmt.Sprintf("%s-%d", groupName, time.Now().UnixNano())
+	newGroupName := fmt.Sprintf("%s-%s", groupName, time.Now().UTC().Format("2006-01-02-15-04-05"))
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	description := fmt.Sprintf("%s created at %s", groupName, createdAt)
+
 	log.Printf("creating security group: vpc=%s name=%s", vpcID, newGroupName)
 
 	createOut, errCreate := client.CreateSecurityGroup(ctx,
 		&ec2.CreateSecurityGroupInput{
-			Description: aws.String("security group for lambda " + groupName),
+			Description: aws.String(description),
 			GroupName:   aws.String(newGroupName),
 			VpcId:       aws.String(vpcID),
+			TagSpecifications: []ec2types.TagSpecification{{
+				ResourceType: ec2types.ResourceTypeSecurityGroup,
+				Tags: []ec2types.Tag{{
+					Key:   aws.String(securityGroupTagKey),
+					Value: aws.String(securityGroupTagValue),
+				}},
+			}},
 		})
 	if errCreate != nil {
 		return "", fmt.Errorf("create security group: %w", errCreate)
@@ -849,6 +861,10 @@ func destroyLambda(parameters lambda) {
 		log.Printf("skipping security group deletion because no security group was attached to the lambda")
 	}
 
+	if err := cleanupTaggedSecurityGroups(ctx, ec2Client, parameters.vpcID); err != nil {
+		errs = append(errs, err)
+	}
+
 	// delete cloudwatch log group
 
 	if err := deleteLogGroup(ctx, logsClient, parameters.functionName); err != nil {
@@ -1112,6 +1128,45 @@ func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client,
 
 	return fmt.Errorf("%s: delete security group %s: dependency violation persisted after %d attempts: %w",
 		me, groupID, maxAttempts, lastErr)
+}
+
+func cleanupTaggedSecurityGroups(ctx context.Context, client *ec2.Client, vpcID string) error {
+	filters := []ec2types.Filter{{
+		Name:   aws.String("tag:" + securityGroupTagKey),
+		Values: []string{securityGroupTagValue},
+	}}
+	if vpcID != "" {
+		filters = append(filters, ec2types.Filter{
+			Name:   aws.String("vpc-id"),
+			Values: []string{vpcID},
+		})
+	}
+
+	p := ec2.NewDescribeSecurityGroupsPaginator(client,
+		&ec2.DescribeSecurityGroupsInput{Filters: filters})
+
+	var groupIDs []string
+
+	for p.HasMorePages() {
+		page, errPage := p.NextPage(ctx)
+		if errPage != nil {
+			return fmt.Errorf("cleanup tagged security groups: describe groups: %w", errPage)
+		}
+
+		for _, sg := range page.SecurityGroups {
+			sgID := aws.ToString(sg.GroupId)
+			groupIDs = append(groupIDs, sgID)
+		}
+	}
+
+	for _, sgID := range groupIDs {
+		const waitSecurityGroupRelease = true
+		if errDelete := deleteSecurityGroupByID(ctx, client, sgID, waitSecurityGroupRelease); errDelete != nil {
+			return fmt.Errorf("cleanup tagged security group %s: %w", sgID, errDelete)
+		}
+	}
+
+	return nil
 }
 
 func waitForSecurityGroupRelease(ctx context.Context, client *ec2.Client, groupID string) error {
