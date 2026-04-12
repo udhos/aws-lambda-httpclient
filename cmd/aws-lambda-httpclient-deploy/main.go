@@ -825,7 +825,7 @@ func destroyLambda(parameters lambda) {
 		errs = append(errs, errSGID)
 	}
 
-	if parameters.vpcID != "" {
+	if securityGroupID != "" {
 		if err := removeLambdaVPCConfig(ctx, lambdaClient, parameters.functionName); err != nil {
 			errs = append(errs, err)
 		}
