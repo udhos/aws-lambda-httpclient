@@ -222,26 +222,65 @@ func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
 
 	createdAt := time.Now().UTC().Format(time.RFC3339)
 	description := fmt.Sprintf("%s created at %s", groupName, createdAt)
+	findExisting := func() (string, error) {
+		findOut, errFind := client.DescribeSecurityGroups(ctx,
+			&ec2.DescribeSecurityGroupsInput{
+				Filters: []ec2types.Filter{
+					{Name: aws.String("vpc-id"), Values: []string{vpcID}},
+					{Name: aws.String("group-name"), Values: []string{groupName}},
+				},
+			})
+		if errFind != nil {
+			return "", fmt.Errorf("find security group %s in vpc %s: %w", groupName, vpcID, errFind)
+		}
 
-	log.Printf("creating security group: vpc=%s name=%s", vpcID, groupName)
+		if len(findOut.SecurityGroups) == 0 {
+			return "", nil
+		}
 
-	createOut, errCreate := client.CreateSecurityGroup(ctx,
-		&ec2.CreateSecurityGroupInput{
-			Description: aws.String(description),
-			GroupName:   aws.String(groupName),
-			VpcId:       aws.String(vpcID),
-			TagSpecifications: []ec2types.TagSpecification{{
-				ResourceType: ec2types.ResourceTypeSecurityGroup,
-				Tags: []ec2types.Tag{{
-					Key:   aws.String(securityGroupTagKey),
-					Value: aws.String(securityGroupTagValue),
-				}},
-			}},
-		})
-	if errCreate != nil {
-		return "", fmt.Errorf("create security group: %w", errCreate)
+		return aws.ToString(findOut.SecurityGroups[0].GroupId), nil
 	}
-	groupID := aws.ToString(createOut.GroupId)
+
+	groupID, errFindExisting := findExisting()
+	if errFindExisting != nil {
+		return "", errFindExisting
+	}
+
+	if groupID != "" {
+		log.Printf("reusing security group: vpc=%s name=%s id=%s", vpcID, groupName, groupID)
+	} else {
+		log.Printf("creating security group: vpc=%s name=%s", vpcID, groupName)
+
+		createOut, errCreate := client.CreateSecurityGroup(ctx,
+			&ec2.CreateSecurityGroupInput{
+				Description: aws.String(description),
+				GroupName:   aws.String(groupName),
+				VpcId:       aws.String(vpcID),
+				TagSpecifications: []ec2types.TagSpecification{{
+					ResourceType: ec2types.ResourceTypeSecurityGroup,
+					Tags: []ec2types.Tag{{
+						Key:   aws.String(securityGroupTagKey),
+						Value: aws.String(securityGroupTagValue),
+					}},
+				}},
+			})
+		if errCreate != nil {
+			if isAWSErrorCode(errCreate, "InvalidGroup.Duplicate") {
+				existingGroupID, errRetryFind := findExisting()
+				if errRetryFind != nil {
+					return "", errRetryFind
+				}
+				if existingGroupID == "" {
+					return "", fmt.Errorf("create security group duplicate but existing group not found")
+				}
+				groupID = existingGroupID
+			} else {
+				return "", fmt.Errorf("create security group: %w", errCreate)
+			}
+		} else {
+			groupID = aws.ToString(createOut.GroupId)
+		}
+	}
 
 	describeOut, errDescribe := client.DescribeSecurityGroups(ctx,
 		&ec2.DescribeSecurityGroupsInput{GroupIds: []string{groupID}})
