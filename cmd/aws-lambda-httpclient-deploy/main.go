@@ -931,16 +931,38 @@ func deleteSecurityGroup(ctx context.Context, client *ec2.Client, vpcID, groupNa
 		return nil
 	}
 
-	_, errDelete := client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: aws.String(groupID)})
-	if errDelete != nil {
+	const maxAttempts = 30
+	const retryInterval = 2 * time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		_, errDelete := client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: aws.String(groupID)})
+		if errDelete == nil {
+			return nil
+		}
+
 		if isAWSErrorCode(errDelete, "InvalidGroup.NotFound") {
 			log.Printf("security group already deleted: id=%s", groupID)
 			return nil
 		}
-		return fmt.Errorf("delete security group %s: %w", groupID, errDelete)
+
+		if !isAWSErrorCode(errDelete, "DependencyViolation") {
+			return fmt.Errorf("delete security group %s: %w", groupID, errDelete)
+		}
+
+		lastErr = errDelete
+		log.Printf("security group still has dependencies (attempt %d/%d): id=%s",
+			attempt, maxAttempts, groupID)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
 	}
 
-	return nil
+	return fmt.Errorf("delete security group %s: dependency violation persisted after %d attempts: %w",
+		groupID, maxAttempts, lastErr)
 }
 
 func deleteLogGroup(ctx context.Context, client *cloudwatchlogs.Client, functionName string) error {
