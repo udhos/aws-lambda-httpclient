@@ -37,6 +37,7 @@ type lambda struct {
 	handler                  string
 	runtime                  string
 	envFile                  string
+	lambdaRoleArn            string
 	logRetentionDays         int
 	functionTimeoutInSeconds int
 	memoryInMB               int
@@ -56,6 +57,7 @@ func main() {
 	flag.StringVar(&parameters.handler, "handler", "main", "Handler for the Lambda function")
 	flag.StringVar(&parameters.runtime, "runtime", "provided.al2023", "Runtime for the Lambda function")
 	flag.StringVar(&parameters.envFile, "env-file", "samples/env.yaml", "Path to YAML file containing Lambda environment variables")
+	flag.StringVar(&parameters.lambdaRoleArn, "lambda-role-arn", "", "ARN of an existing IAM role to use for the Lambda function (if not provided, a new role will be created)")
 	flag.IntVar(&parameters.logRetentionDays, "log-retention-days", 7, "Number of days to retain logs in CloudWatch")
 	flag.IntVar(&parameters.functionTimeoutInSeconds, "function-timeout", 10, "Timeout for the Lambda function in seconds")
 	flag.IntVar(&parameters.memoryInMB, "memory", 128, "Memory size for the Lambda function in MB")
@@ -117,10 +119,18 @@ func deployLambda(parameters lambda) {
 	// ensure role
 
 	roleName := parameters.functionName
-	roleARN, errRole := ensureRole(ctx, iamClient, roleName,
-		string(inlinePolicyBytes))
-	if errRole != nil {
-		log.Fatalf("ensure role: %v", errRole)
+	var roleARN string
+	var errRole error
+	if parameters.lambdaRoleArn != "" {
+		// role ARN provided, skip role creation.
+		roleARN = parameters.lambdaRoleArn
+	} else {
+		// no role ARN provided, ensure role exists or create new one.
+		roleARN, errRole = ensureRole(ctx, iamClient, roleName,
+			string(inlinePolicyBytes))
+		if errRole != nil {
+			log.Fatalf("ensure role: %v", errRole)
+		}
 	}
 
 	// load lambda zip file
