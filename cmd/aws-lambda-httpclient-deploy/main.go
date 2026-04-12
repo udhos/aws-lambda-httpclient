@@ -115,8 +115,16 @@ func deployLambda(parameters lambda) {
 	// ensure security group
 
 	var securityGroupID string
+	var oldSecurityGroupID string
 
 	if parameters.vpcID != "" {
+		oldSGID, errOldSG := getLambdaPrimarySecurityGroupID(ctx, lambdaClient,
+			parameters.functionName)
+		if errOldSG != nil {
+			log.Fatalf("get lambda security group: %v", errOldSG)
+		}
+		oldSecurityGroupID = oldSGID
+
 		securityGroupName := parameters.functionName
 		sgID, errSG := ensureSecurityGroup(ctx, ec2Client,
 			parameters.vpcID, securityGroupName, parameters.sgEgressEntries)
@@ -185,6 +193,13 @@ func deployLambda(parameters lambda) {
 		log.Fatalf("ensure lambda: %v", errLambda)
 	}
 
+	if oldSecurityGroupID != "" && oldSecurityGroupID != securityGroupID {
+		errDeleteOld := deleteSecurityGroupByID(ctx, ec2Client, oldSecurityGroupID)
+		if errDeleteOld != nil {
+			log.Fatalf("delete old lambda security group %s: %v", oldSecurityGroupID, errDeleteOld)
+		}
+	}
+
 	// ensure cloudwatch log group
 
 	errLogGroup := ensureLogGroup(ctx, logsClient, parameters.functionName,
@@ -218,65 +233,19 @@ func loadEnvVars(path string) (map[string]string, error) {
 func ensureSecurityGroup(ctx context.Context, client *ec2.Client, vpcID,
 	groupName, sgEgressEntries string) (string, error) {
 
-	log.Printf("ensuring security group: vpc=%s name=%s", vpcID, groupName)
+	newGroupName := fmt.Sprintf("%s-%d", groupName, time.Now().UnixNano())
+	log.Printf("creating security group: vpc=%s name=%s", vpcID, newGroupName)
 
-	groupID, errFind := findSecurityGroupID(ctx, client, vpcID, groupName)
-	if errFind != nil {
-		return "", fmt.Errorf("find security group: %w", errFind)
-	}
-
-	if groupID == "" {
-		createOut, errCreate := client.CreateSecurityGroup(ctx,
-			&ec2.CreateSecurityGroupInput{
-				Description: aws.String("security group for lambda " + groupName),
-				GroupName:   aws.String(groupName),
-				VpcId:       aws.String(vpcID),
-			})
-		if errCreate != nil {
-			return "", fmt.Errorf("create security group: %w", errCreate)
-		}
-		groupID = aws.ToString(createOut.GroupId)
-	}
-
-	describeOut, errDescribe := client.DescribeSecurityGroups(ctx,
-		&ec2.DescribeSecurityGroupsInput{
-			GroupIds: []string{groupID},
+	createOut, errCreate := client.CreateSecurityGroup(ctx,
+		&ec2.CreateSecurityGroupInput{
+			Description: aws.String("security group for lambda " + groupName),
+			GroupName:   aws.String(newGroupName),
+			VpcId:       aws.String(vpcID),
 		})
-	if errDescribe != nil {
-		return "", fmt.Errorf("describe security group %s: %w", groupID,
-			errDescribe)
+	if errCreate != nil {
+		return "", fmt.Errorf("create security group: %w", errCreate)
 	}
-
-	if len(describeOut.SecurityGroups) != 1 {
-		return "", fmt.Errorf("security group %s not found after create/update",
-			groupID)
-	}
-
-	sg := describeOut.SecurityGroups[0]
-
-	if len(sg.IpPermissions) > 0 {
-		_, errRevokeIngress := client.RevokeSecurityGroupIngress(ctx,
-			&ec2.RevokeSecurityGroupIngressInput{
-				GroupId:       aws.String(groupID),
-				IpPermissions: sg.IpPermissions,
-			})
-		if errRevokeIngress != nil {
-			return "", fmt.Errorf("revoke ingress rules from security group %s: %w",
-				groupID, errRevokeIngress)
-		}
-	}
-
-	if len(sg.IpPermissionsEgress) > 0 {
-		_, errRevokeEgress := client.RevokeSecurityGroupEgress(ctx,
-			&ec2.RevokeSecurityGroupEgressInput{
-				GroupId:       aws.String(groupID),
-				IpPermissions: sg.IpPermissionsEgress,
-			})
-		if errRevokeEgress != nil {
-			return "", fmt.Errorf("revoke egress rules from security group %s: %w",
-				groupID, errRevokeEgress)
-		}
-	}
+	groupID := aws.ToString(createOut.GroupId)
 
 	egressRules, errParse := parseSgEgressEntries(sgEgressEntries)
 	if errParse != nil {
@@ -336,29 +305,6 @@ func parseSgEgressEntries(raw string) ([]ec2types.IpPermission, error) {
 	}
 
 	return ipPermissions, nil
-}
-
-func findSecurityGroupID(ctx context.Context, client *ec2.Client, vpcID,
-	groupName string) (string, error) {
-
-	log.Printf("finding security group: vpc=%s name=%s", vpcID, groupName)
-
-	out, errDescribe := client.DescribeSecurityGroups(ctx,
-		&ec2.DescribeSecurityGroupsInput{
-			Filters: []ec2types.Filter{
-				{Name: aws.String("vpc-id"), Values: []string{vpcID}},
-				{Name: aws.String("group-name"), Values: []string{groupName}},
-			},
-		})
-	if errDescribe != nil {
-		return "", errDescribe
-	}
-
-	if len(out.SecurityGroups) == 0 {
-		return "", nil
-	}
-
-	return aws.ToString(out.SecurityGroups[0].GroupId), nil
 }
 
 func ensureRole(ctx context.Context, client *iam.Client, roleName,
