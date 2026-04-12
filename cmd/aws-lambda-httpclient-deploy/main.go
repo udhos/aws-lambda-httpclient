@@ -194,9 +194,13 @@ func deployLambda(parameters lambda) {
 	}
 
 	if oldSecurityGroupID != "" && oldSecurityGroupID != securityGroupID {
-		errDeleteOld := deleteSecurityGroupByID(ctx, ec2Client, oldSecurityGroupID)
+		const waitSecurityGroupRelease = false
+		errDeleteOld := deleteSecurityGroupByID(ctx, ec2Client,
+			oldSecurityGroupID, waitSecurityGroupRelease)
+
 		if errDeleteOld != nil {
-			log.Fatalf("delete old lambda security group %s: %v", oldSecurityGroupID, errDeleteOld)
+			log.Printf("ERROR: delete old lambda security group %s: %v",
+				oldSecurityGroupID, errDeleteOld)
 		}
 	}
 
@@ -600,11 +604,19 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 		return fmt.Errorf("get function: %w", errGet)
 	}
 
+	// Ensure the function is ready before starting a new update operation.
+	if err := waitForLambdaUpdate(ctx, client, functionName); err != nil {
+		return fmt.Errorf("wait for lambda to be ready before code update: %w", err)
+	}
+
 	log.Printf("updating lambda function code: name=%s", functionName)
 
-	_, errCode := client.UpdateFunctionCode(ctx, &lambdasvc.UpdateFunctionCodeInput{
-		FunctionName: aws.String(functionName),
-		ZipFile:      zipBytes,
+	errCode := retryOnLambdaConflict(ctx, client, functionName, func() error {
+		_, err := client.UpdateFunctionCode(ctx, &lambdasvc.UpdateFunctionCodeInput{
+			FunctionName: aws.String(functionName),
+			ZipFile:      zipBytes,
+		})
+		return err
 	})
 	if errCode != nil {
 		return fmt.Errorf("update function code: %w", errCode)
@@ -634,7 +646,10 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 		input.KMSKeyArn = aws.String(kmsKeyARN)
 	}
 
-	_, errCfg := client.UpdateFunctionConfiguration(ctx, input)
+	errCfg := retryOnLambdaConflict(ctx, client, functionName, func() error {
+		_, err := client.UpdateFunctionConfiguration(ctx, input)
+		return err
+	})
 	if errCfg != nil {
 		return fmt.Errorf("update function configuration: %w", errCfg)
 	}
@@ -666,6 +681,45 @@ func retryOnRoleNotReady(ctx context.Context, op func() error) error {
 	}
 
 	return fmt.Errorf("role did not become assumable by Lambda after %d attempts", maxAttempts)
+}
+
+func retryOnLambdaConflict(ctx context.Context, client *lambdasvc.Client, functionName string, op func() error) error {
+	const maxAttempts = 30
+	const retryInterval = 2 * time.Second
+
+	var lastErr error
+	for attempt := range maxAttempts {
+		err := op()
+		if err == nil {
+			return nil
+		}
+
+		var conflict *lambdatypes.ResourceConflictException
+		if !errors.As(err, &conflict) {
+			return err
+		}
+
+		lastErr = err
+		log.Printf("lambda update conflict, waiting before retry (attempt %d/%d): name=%s",
+			attempt+1, maxAttempts, functionName)
+
+		if errWait := waitForLambdaUpdate(ctx, client, functionName); errWait != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			log.Printf("lambda not ready yet while handling conflict: name=%s error=%v", functionName, errWait)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
+	}
+
+	return fmt.Errorf("lambda update conflict persisted after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // waitForLambdaUpdate polls the Lambda function until it's in Active state with successful update
@@ -786,7 +840,9 @@ func destroyLambda(parameters lambda) {
 
 	// delete the security group that was attached to the lambda before deletion
 	if securityGroupID != "" {
-		if err := deleteSecurityGroupByID(ctx, ec2Client, securityGroupID); err != nil {
+		const waitSecurityGroupRelease = true
+		if err := deleteSecurityGroupByID(ctx, ec2Client, securityGroupID,
+			waitSecurityGroupRelease); err != nil {
 			errs = append(errs, err)
 		}
 	} else {
@@ -991,55 +1047,61 @@ func findDefaultSecurityGroupID(ctx context.Context, client *ec2.Client, vpcID s
 	return aws.ToString(out.SecurityGroups[0].GroupId), nil
 }
 
-func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client, groupID string) error {
-	log.Printf("deleting security group: id=%s", groupID)
+func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client,
+	groupID string, waitSecurityGroupRelease bool) error {
+
+	const me = "deleteSecurityGroupByID"
+
+	log.Printf("%s: deleting security group: id=%s", me, groupID)
 
 	describeOut, errDescribe := client.DescribeSecurityGroups(ctx,
 		&ec2.DescribeSecurityGroupsInput{GroupIds: []string{groupID}})
 	if errDescribe != nil {
 		if isAWSErrorCode(errDescribe, "InvalidGroup.NotFound") {
-			log.Printf("security group already deleted: id=%s", groupID)
+			log.Printf("%s: security group already deleted: id=%s", me, groupID)
 			return nil
 		}
-		return fmt.Errorf("describe security group %s before deletion: %w", groupID, errDescribe)
+		return fmt.Errorf("%s: describe security group %s before deletion: %w", me, groupID, errDescribe)
 	}
 
 	if len(describeOut.SecurityGroups) == 0 {
-		log.Printf("security group already deleted: id=%s", groupID)
+		log.Printf("%s: security group already deleted: id=%s", me, groupID)
 		return nil
 	}
 
 	if aws.ToString(describeOut.SecurityGroups[0].GroupName) == "default" {
-		log.Printf("skipping deletion of default security group: id=%s", groupID)
+		log.Printf("%s: skipping deletion of default security group: id=%s", me, groupID)
 		return nil
 	}
 
-	if err := waitForSecurityGroupRelease(ctx, client, groupID); err != nil {
-		return err
+	if waitSecurityGroupRelease {
+		if err := waitForSecurityGroupRelease(ctx, client, groupID); err != nil {
+			return err
+		}
 	}
 
-	const maxAttempts = 30
+	const maxAttempts = 10
 	const retryInterval = 2 * time.Second
 
 	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		_, errDelete := client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: aws.String(groupID)})
 		if errDelete == nil {
 			return nil
 		}
 
 		if isAWSErrorCode(errDelete, "InvalidGroup.NotFound") {
-			log.Printf("security group already deleted: id=%s", groupID)
+			log.Printf("%s: security group already deleted: id=%s", me, groupID)
 			return nil
 		}
 
 		if !isAWSErrorCode(errDelete, "DependencyViolation") {
-			return fmt.Errorf("delete security group %s: %w", groupID, errDelete)
+			return fmt.Errorf("%s: delete security group %s: %w", me, groupID, errDelete)
 		}
 
 		lastErr = errDelete
-		log.Printf("security group still has dependencies (attempt %d/%d): id=%s",
-			attempt, maxAttempts, groupID)
+		log.Printf("%s: security group still has dependencies (attempt %d/%d): id=%s",
+			me, attempt, maxAttempts, groupID)
 
 		select {
 		case <-ctx.Done():
@@ -1048,8 +1110,8 @@ func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client, groupID st
 		}
 	}
 
-	return fmt.Errorf("delete security group %s: dependency violation persisted after %d attempts: %w",
-		groupID, maxAttempts, lastErr)
+	return fmt.Errorf("%s: delete security group %s: dependency violation persisted after %d attempts: %w",
+		me, groupID, maxAttempts, lastErr)
 }
 
 func waitForSecurityGroupRelease(ctx context.Context, client *ec2.Client, groupID string) error {
@@ -1078,7 +1140,7 @@ func waitForSecurityGroupRelease(ctx context.Context, client *ec2.Client, groupI
 			return nil
 		}
 
-		log.Printf("security group still attached to %d network interface(s) (attempt %d/%d): id=%s",
+		log.Printf("waitForSecurityGroupRelease: security group still attached to %d network interface(s) (attempt %d/%d): id=%s",
 			count, attempt, maxAttempts, groupID)
 
 		select {
@@ -1088,7 +1150,7 @@ func waitForSecurityGroupRelease(ctx context.Context, client *ec2.Client, groupI
 		}
 	}
 
-	return fmt.Errorf("security group %s still attached to network interfaces after waiting", groupID)
+	return fmt.Errorf("waitForSecurityGroupRelease: security group %s still attached to network interfaces after waiting", groupID)
 }
 
 func deleteLogGroup(ctx context.Context, client *cloudwatchlogs.Client, functionName string) error {
