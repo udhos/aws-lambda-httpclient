@@ -848,8 +848,8 @@ func destroyLambda(parameters lambda) {
 	// report errors if any
 
 	if len(errs) > 0 {
-		for _, err := range errs {
-			log.Printf("destroy error: %v", err)
+		for i, err := range errs {
+			log.Printf("destroy error %d/%d: %v", i+1, len(errs), err)
 		}
 		log.Printf("destroy finished with %d error(s)", len(errs))
 		return
