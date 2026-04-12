@@ -36,11 +36,12 @@ type lambda struct {
 	architecture             string
 	handler                  string
 	runtime                  string
+	envFile                  string
 	logRetentionDays         int
 	functionTimeoutInSeconds int
 	memoryInMB               int
+	createKmsKey             bool
 	destroy                  bool
-	envFile                  string
 }
 
 func main() {
@@ -54,10 +55,11 @@ func main() {
 	flag.StringVar(&parameters.architecture, "architecture", "x86_64", "Architecture for the Lambda function (x86_64 or arm64)")
 	flag.StringVar(&parameters.handler, "handler", "main", "Handler for the Lambda function")
 	flag.StringVar(&parameters.runtime, "runtime", "provided.al2023", "Runtime for the Lambda function")
+	flag.StringVar(&parameters.envFile, "env-file", "samples/env.yaml", "Path to YAML file containing Lambda environment variables")
 	flag.IntVar(&parameters.logRetentionDays, "log-retention-days", 7, "Number of days to retain logs in CloudWatch")
 	flag.IntVar(&parameters.functionTimeoutInSeconds, "function-timeout", 10, "Timeout for the Lambda function in seconds")
 	flag.IntVar(&parameters.memoryInMB, "memory", 128, "Memory size for the Lambda function in MB")
-	flag.StringVar(&parameters.envFile, "env-file", "samples/env.yaml", "Path to YAML file containing Lambda environment variables")
+	flag.BoolVar(&parameters.createKmsKey, "create-kms-key", false, "Whether to create a KMS key for the Lambda function")
 	flag.BoolVar(&parameters.destroy, "destroy", false, "Whether to destroy the deployed Lambda function")
 
 	flag.Parse()
@@ -135,10 +137,15 @@ func deployLambda(parameters lambda) {
 		log.Fatalf("load env file: %s: %v", parameters.envFile, errEnvFile)
 	}
 
-	kmsKeyARN, errKMS := ensureKMSKey(ctx, kmsClient, parameters.functionName,
-		roleARN)
-	if errKMS != nil {
-		log.Fatalf("ensure kms key: %v", errKMS)
+	var kmsKeyARN string
+
+	if parameters.createKmsKey {
+		key, errKMS := ensureKMSKey(ctx, kmsClient, parameters.functionName,
+			roleARN)
+		if errKMS != nil {
+			log.Fatalf("ensure kms key: %v", errKMS)
+		}
+		kmsKeyARN = key
 	}
 
 	errLambda := ensureLambda(ctx, lambdaClient, parameters.functionName,
@@ -561,21 +568,26 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 	if errGet != nil {
 		var notFound *lambdatypes.ResourceNotFoundException
 		if errors.As(errGet, &notFound) {
-			_, errCreate := client.CreateFunction(ctx,
-				&lambdasvc.CreateFunctionInput{
-					Architectures: []lambdatypes.Architecture{lambdatypes.Architecture(architecture)},
-					Code:          &lambdatypes.FunctionCode{ZipFile: zipBytes},
-					FunctionName:  aws.String(functionName),
-					Description:   aws.String(functionName),
-					Handler:       aws.String(handler),
-					Role:          aws.String(roleARN),
-					Runtime:       lambdatypes.Runtime(runtime),
-					VpcConfig:     vpcConfig,
-					Timeout:       aws.Int32(functionTimeoutInSeconds),
-					MemorySize:    aws.Int32(memoryInMB),
-					Environment:   &lambdatypes.Environment{Variables: envVars},
-					KMSKeyArn:     aws.String(kmsKeyARN),
-				})
+
+			input := &lambdasvc.CreateFunctionInput{
+				Architectures: []lambdatypes.Architecture{lambdatypes.Architecture(architecture)},
+				Code:          &lambdatypes.FunctionCode{ZipFile: zipBytes},
+				FunctionName:  aws.String(functionName),
+				Description:   aws.String(functionName),
+				Handler:       aws.String(handler),
+				Role:          aws.String(roleARN),
+				Runtime:       lambdatypes.Runtime(runtime),
+				VpcConfig:     vpcConfig,
+				Timeout:       aws.Int32(functionTimeoutInSeconds),
+				MemorySize:    aws.Int32(memoryInMB),
+				Environment:   &lambdatypes.Environment{Variables: envVars},
+			}
+
+			if kmsKeyARN != "" {
+				input.KMSKeyArn = aws.String(kmsKeyARN)
+			}
+
+			_, errCreate := client.CreateFunction(ctx, input)
 			if errCreate != nil {
 				return fmt.Errorf("create function: %w", errCreate)
 			}
@@ -592,19 +604,23 @@ func ensureLambda(ctx context.Context, client *lambdasvc.Client, functionName,
 		return fmt.Errorf("update function code: %w", errCode)
 	}
 
-	_, errCfg := client.UpdateFunctionConfiguration(ctx,
-		&lambdasvc.UpdateFunctionConfigurationInput{
-			FunctionName: aws.String(functionName),
-			Description:  aws.String(functionName),
-			Handler:      aws.String(handler),
-			Role:         aws.String(roleARN),
-			Runtime:      lambdatypes.Runtime(runtime),
-			VpcConfig:    vpcConfig,
-			Timeout:      aws.Int32(functionTimeoutInSeconds),
-			MemorySize:   aws.Int32(memoryInMB),
-			Environment:  &lambdatypes.Environment{Variables: envVars},
-			KMSKeyArn:    aws.String(kmsKeyARN),
-		})
+	input := &lambdasvc.UpdateFunctionConfigurationInput{
+		FunctionName: aws.String(functionName),
+		Description:  aws.String(functionName),
+		Handler:      aws.String(handler),
+		Role:         aws.String(roleARN),
+		Runtime:      lambdatypes.Runtime(runtime),
+		VpcConfig:    vpcConfig,
+		Timeout:      aws.Int32(functionTimeoutInSeconds),
+		MemorySize:   aws.Int32(memoryInMB),
+		Environment:  &lambdatypes.Environment{Variables: envVars},
+	}
+
+	if kmsKeyARN != "" {
+		input.KMSKeyArn = aws.String(kmsKeyARN)
+	}
+
+	_, errCfg := client.UpdateFunctionConfiguration(ctx, input)
 	if errCfg != nil {
 		return fmt.Errorf("update function configuration: %w", errCfg)
 	}
