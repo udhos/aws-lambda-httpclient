@@ -1134,8 +1134,8 @@ func deleteSecurityGroupByID(ctx context.Context, client *ec2.Client,
 
 func deleteSecurityGroupENIs(ctx context.Context, client *ec2.Client, groupID string) error {
 	const me = "deleteSecurityGroupENIs"
-	const maxAttempts = 10
-	const retryInterval = 2 * time.Second
+	const maxAttempts = 20
+	const retryInterval = 3 * time.Second
 
 	p := ec2.NewDescribeNetworkInterfacesPaginator(client,
 		&ec2.DescribeNetworkInterfacesInput{
