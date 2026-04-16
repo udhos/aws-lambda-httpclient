@@ -18,7 +18,7 @@ import (
 )
 
 // Version is lambda version.
-const Version = "0.0.7"
+const Version = "0.0.8"
 
 // HandleRequest is lambda handler.
 func HandleRequest() {
@@ -46,6 +46,7 @@ func HandleRequest() {
 	familyConnect := env.String("FAMILY_CONNECT", "tcp")
 	logHeaders := env.Bool("LOG_HEADERS", true)
 	logBody := env.Bool("LOG_BODY", true)
+	reuseClient := env.Bool("REUSE_CLIENT", false)
 
 	hostOnly, port, portSource := getPort(proto, host)
 
@@ -98,13 +99,19 @@ func HandleRequest() {
 					elapConnect := time.Since(beginConnect)
 
 					if err != nil {
-						log.Printf("%s: %s: connect ERROR latency=%v: %s failed: %v", attempt, addrPos, elapConnect, portLabel, err)
+						log.Printf("%s: %s: connect ERROR latency=%v: %s failed: %v",
+							attempt, addrPos, elapConnect, portLabel, err)
 					} else {
-						log.Printf("%s: %s: connect SUCCESS latency=%v: %s", attempt, addrPos, elapConnect, portLabel)
+						log.Printf("%s: %s: connect SUCCESS latency=%v: %s",
+							attempt, addrPos, elapConnect, portLabel)
 						conn.Close()
 					}
 				}
 			}
+		}
+
+		if !reuseClient {
+			client = newClient(timeout, tlsInsecureSkipVerify)
 		}
 
 		begin := time.Now()
