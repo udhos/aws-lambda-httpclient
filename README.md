@@ -111,7 +111,7 @@ Example:
 URL_HOST=52.71.170.232 VIRTUAL_HOST=httpbin.org aws-lambda-httpclient-app
 ```
 
-# Deploment
+# Deployment
 
 Once you have built the `lambda.zip` file, you can upload it to Lambda.
 

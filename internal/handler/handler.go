@@ -18,7 +18,7 @@ import (
 )
 
 // Version is lambda version.
-const Version = "0.0.8"
+const Version = "0.0.9"
 
 // HandleRequest is lambda handler.
 func HandleRequest() {
